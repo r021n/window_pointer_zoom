@@ -7,10 +7,15 @@ pub mod state;
 mod tray;
 mod window;
 
+use std::sync::Arc;
+
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_store::StoreExt;
 
+use crate::engine::fullscreen_engine::{
+    enable_per_monitor_dpi_awareness, install_console_ctrl_handler,
+};
 use crate::engine::wheel_hook::{spawn_wheel_hook, WheelHookState};
 use crate::shortcuts::{ShortcutConfig, ShortcutManager};
 use crate::state::{AppState, PersistedEngineSettings, ZoomAction, ZoomStatus};
@@ -91,7 +96,9 @@ fn hydrate_from_store(app: &AppHandle) {
 /// Configures and runs the Tauri desktop application.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    enable_per_monitor_dpi_awareness();
+
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             window::show_main_window(app);
         }))
@@ -112,8 +119,11 @@ pub fn run() {
                 window::show_main_window(app.handle());
             }
 
+            let status_handle = app.handle().clone();
             app.state::<AppState>()
-                .start()
+                .start(Some(Arc::new(move |status| {
+                    emit_zoom_status(&status_handle, status);
+                })))
                 .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
             tray::setup_tray(app.handle())?;
             shortcuts::register_shortcuts(app.handle());
@@ -135,13 +145,26 @@ pub fn run() {
             commands::set_shortcuts_paused,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building tauri application")
-        .run(|app, event| {
-            if let tauri::RunEvent::Exit = event {
-                app.state::<WheelHookState>().shutdown();
-                app.state::<AppState>().shutdown();
-            }
-        });
+        .expect("error while building tauri application");
+
+    let exit_handle = app.handle().clone();
+    let close_handle = app.handle().clone();
+    let _console_ctrl_guard = install_console_ctrl_handler(
+        Arc::new(move || {
+            exit_handle.exit(0);
+        }),
+        Arc::new(move || {
+            close_handle.state::<AppState>().shutdown();
+        }),
+    );
+
+    app.run(|app, event| {
+        if let tauri::RunEvent::Exit = event {
+            shortcuts::unregister_all(app);
+            app.state::<WheelHookState>().shutdown();
+            app.state::<AppState>().shutdown();
+        }
+    });
 }
 
 #[cfg(test)]
@@ -149,7 +172,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::engine::viewport_math::{MAX_EDGE_DEADZONE_RATIO, PanningMode};
+    use crate::engine::viewport_math::{PanningMode, MAX_EDGE_DEADZONE_RATIO};
     use crate::state::{config_constraints, EngineSettingsSnapshot, PanningConfig, ZoomLimits};
 
     #[test]
@@ -263,7 +286,9 @@ mod tests {
         assert!(constraints.get("defaultPanning").is_some());
         assert!(constraints.get("defaultShortcuts").is_some());
 
-        let limits = serialized["status"]["limits"].as_object().expect("limits obj");
+        let limits = serialized["status"]["limits"]
+            .as_object()
+            .expect("limits obj");
         assert!(limits.contains_key("minScale"));
         assert!(limits.contains_key("defaultScale"));
         assert!(limits.contains_key("maxScale"));

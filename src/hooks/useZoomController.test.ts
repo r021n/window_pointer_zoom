@@ -26,6 +26,7 @@ function makeStatus(overrides: Partial<ZoomStatus> = {}): ZoomStatus {
     active: false,
     targetScale: 1.0,
     currentScale: 1.0,
+    inputMapping: { state: "disabled", uiAccess: true, errorCode: null, uiAccessErrorCode: null },
     config: BASE_CONFIG,
     limits: { minScale: 1.0, defaultScale: 2.0, maxScale: 5.0 },
     ...overrides,
@@ -68,7 +69,7 @@ describe("useZoomController", () => {
     expect(tauriCommands.getZoomStatus).toHaveBeenCalledTimes(1);
   });
 
-  it("polls every 100ms while zooming in and stops once settled", async () => {
+  it("polls every 100ms while zooming in and slows once settled", async () => {
     const initial = makeStatus();
     const afterZoomIn = makeStatus({
       active: true,
@@ -196,6 +197,19 @@ describe("useZoomController", () => {
     expect(tauriCommands.setZoomLevel).toHaveBeenCalledTimes(2);
     expect(tauriCommands.setZoomLevel).toHaveBeenLastCalledWith(3.0);
     expect(result.current.status?.targetScale).toBe(3.0);
+  });
+
+  it("detects input failures after the zoom scale has settled", async () => {
+    const zoomed = makeStatus({ active: true, currentScale: 2, targetScale: 2,
+      inputMapping: { state: "active", uiAccess: true, errorCode: null, uiAccessErrorCode: null },
+    });
+    const failed = { ...zoomed, inputMapping: { ...zoomed.inputMapping, state: "error" as const, errorCode: -1 } };
+    vi.mocked(tauriCommands.getZoomStatus).mockResolvedValueOnce(zoomed).mockResolvedValue(failed);
+    const { result } = renderHook(() => useZoomController());
+    await flushPromises();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(result.current.status?.inputMapping.state).toBe("error");
+    expect(tauriCommands.getZoomStatus).toHaveBeenCalledTimes(2);
   });
 
   it("cleans up polling interval on unmount", async () => {

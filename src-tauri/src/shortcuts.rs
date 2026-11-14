@@ -289,6 +289,13 @@ pub fn register_shortcuts(app: &AppHandle) {
     }
 }
 
+/// Best-effort unregistration of all global shortcuts on application shutdown.
+pub fn unregister_all(app: &AppHandle) {
+    if let Err(err) = app.global_shortcut().unregister_all() {
+        eprintln!("Warning: failed to unregister global shortcuts on exit: {err}");
+    }
+}
+
 /// Unregisters active shortcuts when `paused = true`, or re-registers them when `paused = false`.
 pub fn set_shortcuts_paused(
     app: &AppHandle,

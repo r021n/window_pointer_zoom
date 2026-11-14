@@ -195,9 +195,32 @@ pub fn config_constraints() -> ConfigConstraints {
 }
 
 /// Snapshot of current zoom engine state returned by IPC commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputMappingState {
+    #[default]
+    Pending,
+    Active,
+    Denied,
+    Error,
+    Disabled,
+}
+
+/// Runtime health, independent from whether visual magnification succeeded.
+/// Error codes are signed HRESULT values; a missing token result is unknown, not false.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InputMappingStatus {
+    pub state: InputMappingState,
+    pub ui_access: Option<bool>,
+    pub error_code: Option<i32>,
+    pub ui_access_error_code: Option<i32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ZoomStatus {
+    pub input_mapping: InputMappingStatus,
     pub active: bool,
     pub target_scale: f32,
     pub current_scale: f32,
@@ -225,6 +248,7 @@ pub enum ZoomAction {
 
 #[derive(Debug, Clone, Copy)]
 struct EngineControl {
+    input_mapping: InputMappingStatus,
     target_scale: f32,
     current_scale: f32,
     last_toggle_scale: f32,
@@ -238,6 +262,7 @@ impl Default for EngineControl {
     fn default() -> Self {
         let limits = ZoomLimits::default();
         Self {
+            input_mapping: InputMappingStatus::default(),
             target_scale: UNMAGNIFIED_SCALE,
             current_scale: UNMAGNIFIED_SCALE,
             last_toggle_scale: limits.default_scale,
@@ -252,6 +277,7 @@ impl Default for EngineControl {
 impl EngineControl {
     fn to_status(self) -> ZoomStatus {
         ZoomStatus {
+            input_mapping: self.input_mapping,
             active: self.target_scale > UNMAGNIFIED_SCALE || self.is_animating,
             target_scale: self.target_scale,
             current_scale: self.current_scale,
@@ -267,6 +293,9 @@ impl EngineControl {
             next_scale.clamp(self.limits.min_scale, self.limits.max_scale)
         };
         self.target_scale = clamped;
+        if clamped > UNMAGNIFIED_SCALE && self.input_mapping.state == InputMappingState::Disabled {
+            self.input_mapping.state = InputMappingState::Pending;
+        }
         if (clamped - self.current_scale).abs() >= ZOOM_SNAP_EPSILON {
             self.is_animating = true;
         }
@@ -278,6 +307,9 @@ pub struct SharedEngine {
     control: Mutex<EngineControl>,
     wake: Condvar,
 }
+
+/// Callback invoked when `input_mapping` transitions in `SharedEngine`.
+pub type StatusChangeCallback = Arc<dyn Fn(ZoomStatus) + Send + Sync>;
 
 impl Default for SharedEngine {
     fn default() -> Self {
@@ -297,6 +329,17 @@ impl SharedEngine {
         self.control
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Called by the worker after initialization and every transform attempt.
+    /// Returns the updated `ZoomStatus` only when `input_mapping` changed.
+    pub fn report_input_mapping(&self, status: InputMappingStatus) -> Option<ZoomStatus> {
+        let mut guard = self.lock_control();
+        if guard.input_mapping == status {
+            return None;
+        }
+        guard.input_mapping = status;
+        Some(guard.to_status())
     }
 
     /// Blocks until the worker should run a frame (`Some`) or exit (`None`).
@@ -374,7 +417,7 @@ impl AppState {
     }
 
     /// Spawns the background zoom engine thread if it is not already running.
-    pub fn start(&self) -> Result<(), String> {
+    pub fn start(&self, on_status_change: Option<StatusChangeCallback>) -> Result<(), String> {
         let mut worker_guard = self
             .worker
             .lock()
@@ -384,7 +427,7 @@ impl AppState {
         }
 
         self.shared.clear_shutdown();
-        let handle = spawn_engine(Arc::clone(&self.shared))?;
+        let handle = spawn_engine(Arc::clone(&self.shared), on_status_change)?;
         *worker_guard = Some(handle);
         Ok(())
     }
@@ -430,9 +473,7 @@ impl AppState {
     pub fn toggle_zoom(&self) -> Result<ZoomStatus, String> {
         Ok(self.update_target(|c| {
             if c.target_scale > UNMAGNIFIED_SCALE {
-                c.last_toggle_scale = c
-                    .target_scale
-                    .clamp(c.limits.min_scale, c.limits.max_scale);
+                c.last_toggle_scale = c.target_scale.clamp(c.limits.min_scale, c.limits.max_scale);
                 UNMAGNIFIED_SCALE
             } else if c.last_toggle_scale > UNMAGNIFIED_SCALE {
                 c.last_toggle_scale
@@ -467,6 +508,9 @@ impl AppState {
     pub fn update_panning_config(&self, config: PanningConfig) -> Result<ZoomStatus, String> {
         let sanitized = config.sanitized();
         let mut guard = self.shared.lock_control();
+        if guard.shutdown {
+            return Ok(guard.to_status());
+        }
         guard.config = sanitized;
         if guard.target_scale > UNMAGNIFIED_SCALE || guard.is_animating {
             self.shared.wake.notify_one();
@@ -478,6 +522,9 @@ impl AppState {
     pub fn update_zoom_limits(&self, limits: ZoomLimits) -> Result<ZoomStatus, String> {
         let sanitized = limits.sanitized();
         let mut guard = self.shared.lock_control();
+        if guard.shutdown {
+            return Ok(guard.to_status());
+        }
         let default_changed =
             (sanitized.default_scale - guard.limits.default_scale).abs() > ZOOM_SNAP_EPSILON;
         guard.limits = sanitized;
@@ -520,6 +567,9 @@ impl AppState {
         F: FnOnce(&mut EngineControl) -> f32,
     {
         let mut guard = self.shared.lock_control();
+        if guard.shutdown {
+            return guard.to_status();
+        }
         let next = next_fn(&mut guard);
         guard.set_target_scale(next);
         if guard.target_scale > UNMAGNIFIED_SCALE || guard.is_animating {
@@ -538,6 +588,68 @@ impl Drop for AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_mapping_health_reaches_ipc_and_target_changes_cannot_mask_failure() {
+        let state = AppState::new();
+        assert_eq!(
+            state.status().input_mapping.state,
+            InputMappingState::Pending
+        );
+        let denied = InputMappingStatus {
+            state: InputMappingState::Denied,
+            ui_access: Some(false),
+            error_code: Some(0x80070005u32 as i32),
+            ui_access_error_code: None,
+        };
+        state.shared.report_input_mapping(denied);
+        assert_eq!(state.set_zoom_level(2.5).unwrap().input_mapping, denied);
+        assert_eq!(state.reset_zoom().unwrap().input_mapping, denied);
+        let serialized = serde_json::to_value(state.status()).unwrap();
+        assert_eq!(serialized["inputMapping"]["state"], "denied");
+        assert_eq!(serialized["inputMapping"]["uiAccess"], false);
+        assert_eq!(serialized["inputMapping"]["errorCode"], -2147024891i32);
+
+        state.shared.report_input_mapping(InputMappingStatus {
+            state: InputMappingState::Disabled,
+            ..denied
+        });
+        assert_eq!(
+            state.set_zoom_level(2.0).unwrap().input_mapping.state,
+            InputMappingState::Pending
+        );
+    }
+
+    #[test]
+    fn report_input_mapping_returns_some_only_on_change() {
+        let shared = SharedEngine::new();
+        assert_eq!(
+            shared.report_input_mapping(InputMappingStatus::default()),
+            None
+        );
+
+        let disabled = InputMappingStatus {
+            state: InputMappingState::Disabled,
+            ui_access: Some(true),
+            error_code: None,
+            ui_access_error_code: None,
+        };
+        let first = shared
+            .report_input_mapping(disabled)
+            .expect("Pending -> Disabled should emit");
+        assert_eq!(first.input_mapping, disabled);
+        assert_eq!(shared.report_input_mapping(disabled), None);
+
+        let active = InputMappingStatus {
+            state: InputMappingState::Active,
+            ..disabled
+        };
+        let second = shared
+            .report_input_mapping(active)
+            .expect("Disabled -> Active should emit");
+        assert_eq!(second.input_mapping, active);
+        assert_eq!(shared.report_input_mapping(active), None);
+    }
 
     #[test]
     fn zoom_bounds_clamping_and_step_commands() {
@@ -651,15 +763,24 @@ mod tests {
 
         // set_zoom_level clamps > 1.0 into [1.5, 4.0] and <= 1.0 to 1.0.
         assert_eq!(
-            state.set_zoom_level(1.2).expect("set_zoom_level").target_scale,
+            state
+                .set_zoom_level(1.2)
+                .expect("set_zoom_level")
+                .target_scale,
             1.5
         );
         assert_eq!(
-            state.set_zoom_level(6.0).expect("set_zoom_level").target_scale,
+            state
+                .set_zoom_level(6.0)
+                .expect("set_zoom_level")
+                .target_scale,
             4.0
         );
         assert_eq!(
-            state.set_zoom_level(1.0).expect("set_zoom_level").target_scale,
+            state
+                .set_zoom_level(1.0)
+                .expect("set_zoom_level")
+                .target_scale,
             UNMAGNIFIED_SCALE
         );
 
@@ -812,7 +933,10 @@ mod tests {
         let zoomed_in = state
             .apply_action(ZoomAction::ZoomIn)
             .expect("zoom_in action succeeds");
-        assert_eq!(zoomed_in.target_scale, DEFAULT_TOGGLE_SCALE + DEFAULT_ZOOM_STEP);
+        assert_eq!(
+            zoomed_in.target_scale,
+            DEFAULT_TOGGLE_SCALE + DEFAULT_ZOOM_STEP
+        );
 
         let zoomed_out = state
             .apply_action(ZoomAction::ZoomOut)
@@ -823,5 +947,54 @@ mod tests {
             .apply_action(ZoomAction::Reset)
             .expect("reset action succeeds");
         assert_eq!(reset.target_scale, UNMAGNIFIED_SCALE);
+    }
+
+    #[test]
+    fn mutations_after_shutdown_are_ignored_and_do_not_rearm_animation() {
+        let state = AppState::new();
+        state.shutdown();
+
+        let status = state.zoom_in().expect("zoom_in returns status");
+        assert!(!status.active);
+        assert_eq!(status.target_scale, UNMAGNIFIED_SCALE);
+
+        let status = state.zoom_out().expect("zoom_out returns status");
+        assert!(!status.active);
+        assert_eq!(status.target_scale, UNMAGNIFIED_SCALE);
+
+        let status = state
+            .set_zoom_level(3.0)
+            .expect("set_zoom_level returns status");
+        assert!(!status.active);
+        assert_eq!(status.target_scale, UNMAGNIFIED_SCALE);
+
+        let status = state.toggle_zoom().expect("toggle_zoom returns status");
+        assert!(!status.active);
+        assert_eq!(status.target_scale, UNMAGNIFIED_SCALE);
+
+        let new_panning = PanningConfig {
+            mode: PanningMode::EdgePanning,
+            zoom_step: 1.0,
+            zoom_alpha: 0.5,
+            pan_alpha: 0.5,
+            edge_deadzone: 0.25,
+        };
+        let status = state
+            .update_panning_config(new_panning)
+            .expect("update_panning_config returns status");
+        assert!(!status.active);
+        assert_eq!(status.config, PanningConfig::default());
+
+        let new_limits = ZoomLimits {
+            min_scale: 1.5,
+            default_scale: 3.0,
+            max_scale: 8.0,
+        };
+        let status = state
+            .update_zoom_limits(new_limits)
+            .expect("update_zoom_limits returns status");
+        assert!(!status.active);
+        assert_eq!(status.limits, ZoomLimits::default());
+        assert_eq!(status.target_scale, UNMAGNIFIED_SCALE);
     }
 }

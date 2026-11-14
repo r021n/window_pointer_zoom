@@ -56,6 +56,7 @@ function makeStatus(overrides: Partial<ZoomStatus> = {}): ZoomStatus {
     active: false,
     targetScale: 1.0,
     currentScale: 1.0,
+    inputMapping: { state: "disabled", uiAccess: true, errorCode: null, uiAccessErrorCode: null },
     config: DEFAULT_PANNING,
     limits: DEFAULT_LIMITS,
     ...overrides,

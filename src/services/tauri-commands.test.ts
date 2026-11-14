@@ -51,6 +51,7 @@ const SAMPLE_STATUS: ZoomStatus = {
   active: false,
   targetScale: 1.0,
   currentScale: 1.0,
+  inputMapping: { state: "disabled", uiAccess: true, errorCode: null, uiAccessErrorCode: null },
   config: SAMPLE_CONFIG,
   limits: SAMPLE_LIMITS,
 };

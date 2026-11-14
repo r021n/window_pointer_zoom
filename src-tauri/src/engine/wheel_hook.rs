@@ -215,7 +215,9 @@ pub fn spawn_wheel_hook(app: AppHandle) -> Result<WheelHookHandle, String> {
                 let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
             }
 
-            let hook = match unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(low_level_mouse_proc), None, 0) } {
+            let hook = match unsafe {
+                SetWindowsHookExW(WH_MOUSE_LL, Some(low_level_mouse_proc), None, 0)
+            } {
                 Ok(hook) => hook,
                 Err(err) => {
                     let _ = init_tx.send(Err(format!("Failed to install mouse wheel hook: {err}")));
@@ -271,7 +273,10 @@ mod tests {
 
         assert_eq!(acc.push(120, t0), vec![ZoomAction::ZoomIn]);
         assert_eq!(acc.push(-120, t0), vec![ZoomAction::ZoomOut]);
-        assert_eq!(acc.push(240, t0), vec![ZoomAction::ZoomIn, ZoomAction::ZoomIn]);
+        assert_eq!(
+            acc.push(240, t0),
+            vec![ZoomAction::ZoomIn, ZoomAction::ZoomIn]
+        );
     }
 
     #[test]

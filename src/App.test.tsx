@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -68,6 +69,7 @@ function makeStatus(overrides: Partial<ZoomStatus> = {}): ZoomStatus {
     active: false,
     targetScale: 1.0,
     currentScale: 1.0,
+    inputMapping: { state: "disabled", uiAccess: true, errorCode: null, uiAccessErrorCode: null },
     config: DEFAULT_CONFIG,
     limits: DEFAULT_LIMITS,
     ...overrides,
@@ -334,5 +336,62 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Dismiss error" }));
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("renders InputMappingNotice when denied, resets zoom from notice, and shows InputMappingDiagnostics in Settings", async () => {
+    const deniedStatus = makeStatus({
+      active: true,
+      currentScale: 2.0,
+      targetScale: 2.0,
+      inputMapping: {
+        state: "denied",
+        uiAccess: false,
+        errorCode: -2147024891,
+        uiAccessErrorCode: null,
+      },
+    });
+    const resetStatus = makeStatus({
+      active: false,
+      currentScale: 1.0,
+      targetScale: 1.0,
+      inputMapping: {
+        state: "denied",
+        uiAccess: false,
+        errorCode: -2147024891,
+        uiAccessErrorCode: null,
+      },
+    });
+
+    mockedInvoke.mockImplementation(async (cmd) => {
+      switch (cmd) {
+        case "get_zoom_status":
+          return deniedStatus;
+        case "get_engine_settings":
+          return makeSnapshot(deniedStatus);
+        case "reset_zoom":
+          return resetStatus;
+        default:
+          return deniedStatus;
+      }
+    });
+
+    render(<App />);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Clicks may miss their targets while zoomed.");
+    expect(alert.textContent).toContain("0x80070005 (-2147024891)");
+
+    fireEvent.click(within(alert).getByRole("button", { name: "Reset (1.00x)" }));
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith("reset_zoom");
+      expect(screen.getByTestId("current-scale").textContent).toBe("1.00x");
+    });
+
+    switchTab("Settings");
+    const diagnosticsSummary = await screen.findByText("Mouse input diagnostics");
+    const diagnostics = diagnosticsSummary.closest("details");
+    expect(diagnostics?.textContent).toContain("Input mapping: denied");
+    expect(diagnostics?.textContent).toContain("UIAccess: false");
+    expect(diagnostics?.textContent).toContain("Zoom/input error: 0x80070005 (-2147024891)");
   });
 });

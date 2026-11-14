@@ -1,4 +1,5 @@
 import { Sliders, Wrench, ZoomIn } from "lucide-react";
+import { InputMappingDiagnostics, InputMappingNotice } from "./components/InputMappingNotice";
 import { PanningBehaviorPanel } from "./components/PanningBehaviorPanel";
 import { ShortcutConfigurator } from "./components/ShortcutConfigurator";
 import { SystemSettingsPanel } from "./components/SystemSettingsPanel";
@@ -69,6 +70,8 @@ export function App() {
           <h1 className="text-lg font-semibold tracking-tight">Window Pointer Zoom</h1>
         </div>
       </header>
+
+      {status && <InputMappingNotice status={status} onReset={() => void resetZoom()} />}
 
       {combinedError && (
         <div
@@ -147,6 +150,7 @@ export function App() {
             </TabsContent>
 
             <TabsContent value="system">
+              <InputMappingDiagnostics status={status!} />
               <ShortcutConfigurator
                 shortcuts={shortcuts!}
                 shortcutError={shortcutError}

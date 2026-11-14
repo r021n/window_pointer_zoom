@@ -18,11 +18,19 @@ export interface PanningConfig {
 }
 
 export interface ZoomStatus {
+  inputMapping: InputMappingStatus;
   active: boolean;
   targetScale: number;
   currentScale: number;
   config: PanningConfig;
   limits: ZoomLimits;
+}
+
+export interface InputMappingStatus {
+  state: "pending" | "active" | "denied" | "error" | "disabled";
+  uiAccess: boolean | null;
+  errorCode: number | null;
+  uiAccessErrorCode: number | null;
 }
 
 export interface ShortcutConfig {

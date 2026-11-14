@@ -145,13 +145,19 @@ export function useZoomController(): ZoomController {
     };
   }, [applyError, applyResponse, refreshStatus]);
 
-  const shouldPoll = Boolean(
+  const isAnimating = Boolean(
     status?.active &&
       Math.abs(status.currentScale - status.targetScale) > SCALE_EPSILON,
   );
+  // Panning can fail to update input mapping even after the zoom scale settles.
+  const pollInterval = isAnimating
+    ? POLL_INTERVAL_MS
+    : status?.active || status?.inputMapping.state === "pending"
+      ? 1000
+      : null;
 
   useEffect(() => {
-    if (!shouldPoll) {
+    if (pollInterval === null) {
       return;
     }
 
@@ -165,12 +171,12 @@ export function useZoomController(): ZoomController {
       void refreshStatus().finally(() => {
         pollInFlightRef.current = false;
       });
-    }, POLL_INTERVAL_MS);
+    }, pollInterval);
 
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [refreshStatus, shouldPoll]);
+  }, [refreshStatus, pollInterval]);
 
   const zoomIn = useCallback(() => {
     throttledSetZoomRef.current?.cancel();
