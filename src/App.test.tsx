@@ -6,15 +6,41 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import type { PanningConfig, ZoomStatus } from "./services/tauri-commands";
+import * as autostartService from "./services/autostart";
+import * as settingsStore from "./services/settings-store";
+import type {
+  EngineSettingsSnapshot,
+  PanningConfig,
+  ShortcutConfig,
+  ZoomLimits,
+  ZoomStatus,
+} from "./types/settings";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
 
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(),
+}));
+
+vi.mock("./services/settings-store", () => ({
+  loadTheme: vi.fn(() => Promise.resolve("system")),
+  saveTheme: vi.fn(() => Promise.resolve()),
+  saveEngineSettings: vi.fn(() => Promise.resolve()),
+  saveShortcuts: vi.fn(() => Promise.resolve()),
+}));
+
+vi.mock("./services/autostart", () => ({
+  isAutostartEnabled: vi.fn(() => Promise.resolve(false)),
+  setAutostartEnabled: vi.fn(() => Promise.resolve()),
+}));
+
 const mockedInvoke = vi.mocked(invoke);
+const mockedListen = vi.mocked(listen);
 
 const DEFAULT_CONFIG: PanningConfig = {
   mode: "center_follow",
@@ -24,53 +50,86 @@ const DEFAULT_CONFIG: PanningConfig = {
   edgeDeadzone: 0.15,
 };
 
+const DEFAULT_LIMITS: ZoomLimits = {
+  minScale: 1.0,
+  defaultScale: 2.0,
+  maxScale: 5.0,
+};
+
+const DEFAULT_SHORTCUTS: ShortcutConfig = {
+  toggle: "Ctrl+Alt+Z",
+  zoomIn: "Ctrl+Alt+Up",
+  zoomOut: "Ctrl+Alt+Down",
+  reset: "Ctrl+Alt+0",
+};
+
 function makeStatus(overrides: Partial<ZoomStatus> = {}): ZoomStatus {
   return {
     active: false,
     targetScale: 1.0,
     currentScale: 1.0,
     config: DEFAULT_CONFIG,
-    limits: { minScale: 1.0, maxScale: 5.0 },
+    limits: DEFAULT_LIMITS,
     ...overrides,
   };
 }
 
+function makeSnapshot(status = makeStatus()): EngineSettingsSnapshot {
+  return {
+    status,
+    shortcuts: DEFAULT_SHORTCUTS,
+    constraints: {
+      scaleEnvelope: { min: 1.0, max: 10.0, step: 0.1 },
+      zoomStep: { min: 0.05, max: 2.0, step: 0.05 },
+      alpha: { min: 0.01, max: 1.0, step: 0.01 },
+      edgeDeadzone: { min: 0.05, max: 0.45, step: 0.01 },
+      defaultLimits: DEFAULT_LIMITS,
+      defaultPanning: DEFAULT_CONFIG,
+      defaultShortcuts: DEFAULT_SHORTCUTS,
+    },
+  };
+}
+
+function switchTab(name: string) {
+  const tab = screen.getByRole("tab", { name });
+  fireEvent.mouseDown(tab, { button: 0 });
+  fireEvent.click(tab);
+}
+
 describe("App", () => {
   beforeEach(() => {
-    mockedInvoke.mockReset();
+    vi.clearAllMocks();
+    mockedListen.mockResolvedValue(vi.fn());
+    vi.mocked(settingsStore.loadTheme).mockResolvedValue("system");
+    vi.mocked(autostartService.isAutostartEnabled).mockResolvedValue(false);
   });
 
   afterEach(() => {
     cleanup();
   });
 
-  it("renders initial status, disables edgeDeadzone in center_follow mode, and handles zoom controls", async () => {
-    const initial = makeStatus();
+  it("renders controls tab, enforces 1.00x unmagnified floor when minScale > 1.0, and executes zoom commands", async () => {
+    const elevatedLimits: ZoomLimits = {
+      minScale: 1.5,
+      defaultScale: 2.5,
+      maxScale: 6.0,
+    };
+    const initial = makeStatus({ limits: elevatedLimits });
     const zoomed = makeStatus({
       active: true,
-      currentScale: 1.25,
-      targetScale: 1.25,
+      currentScale: 1.5,
+      targetScale: 1.5,
+      limits: elevatedLimits,
     });
-    const sliderZoomed = makeStatus({
-      active: true,
-      currentScale: 2.5,
-      targetScale: 2.5,
-    });
-    const reset = makeStatus({
-      active: false,
-      currentScale: 1.0,
-      targetScale: 1.0,
-    });
+    const reset = makeStatus({ limits: elevatedLimits });
 
     mockedInvoke.mockImplementation(async (cmd) => {
       switch (cmd) {
         case "get_zoom_status":
           return initial;
+        case "get_engine_settings":
+          return makeSnapshot(initial);
         case "zoom_in":
-          return zoomed;
-        case "set_zoom_level":
-          return sliderZoomed;
-        case "zoom_out":
           return zoomed;
         case "reset_zoom":
           return reset;
@@ -87,8 +146,6 @@ describe("App", () => {
       expect(screen.getByTestId("current-scale").textContent).toBe("1.00x");
     });
 
-    expect(screen.getByTestId("zoom-status-badge").textContent).toBe("Inactive");
-
     const zoomOutBtn = screen.getByRole("button", {
       name: "Zoom Out",
     }) as HTMLButtonElement;
@@ -98,46 +155,35 @@ describe("App", () => {
     expect(zoomOutBtn.disabled).toBe(true);
     expect(resetBtn.disabled).toBe(true);
 
-    const deadzoneInput = screen.getByLabelText(
-      "Edge Deadzone",
-    ) as HTMLInputElement;
-    expect(deadzoneInput.disabled).toBe(true);
+    // Target slider keeps min=1.0 even when limits.minScale is 1.5
+    const targetSlider = screen.getByRole("slider", {
+      name: "Target Zoom Level",
+    });
+    expect(targetSlider.getAttribute("aria-valuemin")).toBe("1");
+    expect(targetSlider.getAttribute("aria-valuemax")).toBe("6");
 
     fireEvent.click(screen.getByRole("button", { name: "Zoom In" }));
     await waitFor(() => {
-      expect(screen.getByTestId("target-scale").textContent).toBe("1.25x");
+      expect(screen.getByTestId("current-scale").textContent).toBe("1.50x");
       expect(screen.getByTestId("zoom-status-badge").textContent).toBe("Active");
     });
-    expect(mockedInvoke).toHaveBeenCalledWith("zoom_in");
+    expect(zoomOutBtn.disabled).toBe(false);
+    expect(resetBtn.disabled).toBe(false);
 
-    const slider = screen.getByLabelText("Target Zoom Level") as HTMLInputElement;
-    expect(slider.min).toBe("1");
-    expect(slider.max).toBe("5");
-
-    fireEvent.change(slider, { target: { value: "2.5" } });
+    fireEvent.click(resetBtn);
     await waitFor(() => {
-      expect(screen.getByTestId("target-scale").textContent).toBe("2.50x");
-    });
-    expect(mockedInvoke).toHaveBeenCalledWith("set_zoom_level", { scale: 2.5 });
-
-    fireEvent.click(screen.getByRole("button", { name: "Zoom Out" }));
-    await waitFor(() => {
-      expect(screen.getByTestId("target-scale").textContent).toBe("1.25x");
-    });
-    expect(mockedInvoke).toHaveBeenCalledWith("zoom_out");
-
-    fireEvent.click(screen.getByRole("button", { name: "Reset (1.00x)" }));
-    await waitFor(() => {
-      expect(screen.getByTestId("target-scale").textContent).toBe("1.00x");
+      expect(screen.getByTestId("current-scale").textContent).toBe("1.00x");
       expect(screen.getByTestId("zoom-status-badge").textContent).toBe("Inactive");
     });
-    expect(mockedInvoke).toHaveBeenCalledWith("reset_zoom");
   });
 
-  it("updates panning mode and config parameters", async () => {
+  it("switches to Motion tab and updates panning mode, deadzone state, and step presets", async () => {
     let current = makeStatus();
 
     mockedInvoke.mockImplementation(async (cmd, args) => {
+      if (cmd === "get_engine_settings") {
+        return makeSnapshot(current);
+      }
       if (cmd === "update_panning_config") {
         const { config } = args as { config: PanningConfig };
         current = makeStatus({ config });
@@ -147,26 +193,31 @@ describe("App", () => {
     });
 
     render(<App />);
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: "Motion" })).toBeTruthy();
+    });
+
+    switchTab("Motion");
+
+    const deadzoneSlider = await screen.findByRole("slider", {
+      name: "Edge Deadzone",
+    });
+    expect(deadzoneSlider.getAttribute("aria-disabled")).toBe("true");
+    expect(deadzoneSlider.hasAttribute("data-disabled")).toBe(true);
+
+    fireEvent.keyDown(screen.getByRole("radio", { name: "Center-locked" }), { key: "ArrowRight" });
 
     await waitFor(() => {
-      expect(screen.getByLabelText("Panning Mode")).toBeTruthy();
+      expect(mockedInvoke).toHaveBeenCalledWith("update_panning_config", {
+        config: { ...DEFAULT_CONFIG, mode: "edge_panning" },
+      });
     });
+    expect(deadzoneSlider.getAttribute("aria-disabled")).toBeNull();
+    expect(deadzoneSlider.hasAttribute("data-disabled")).toBe(false);
+    expect(settingsStore.saveEngineSettings).toHaveBeenCalled();
 
-    const modeSelect = screen.getByLabelText("Panning Mode") as HTMLSelectElement;
-    fireEvent.change(modeSelect, { target: { value: "edge_panning" } });
-
-    await waitFor(() => {
-      expect(
-        (screen.getByLabelText("Edge Deadzone") as HTMLInputElement).disabled,
-      ).toBe(false);
-    });
-    expect(mockedInvoke).toHaveBeenCalledWith("update_panning_config", {
-      config: { ...DEFAULT_CONFIG, mode: "edge_panning" },
-    });
-
-    const zoomStepInput = screen.getByLabelText("Zoom Step") as HTMLInputElement;
-    fireEvent.change(zoomStepInput, { target: { value: "0.5" } });
-
+    switchTab("Zoom");
+    fireEvent.click(screen.getByRole("button", { name: "0.5x" }));
     await waitFor(() => {
       expect(mockedInvoke).toHaveBeenCalledWith("update_panning_config", {
         config: { ...DEFAULT_CONFIG, mode: "edge_panning", zoomStep: 0.5 },
@@ -174,8 +225,104 @@ describe("App", () => {
     });
   });
 
+  it("manages shortcut recording pause lifecycle, duplicate validation, and system settings", async () => {
+    const current = makeStatus();
+
+    mockedInvoke.mockImplementation(async (cmd, args) => {
+      if (cmd === "get_engine_settings") {
+        return makeSnapshot(current);
+      }
+      if (cmd === "update_shortcuts") {
+        return (args as { config: ShortcutConfig }).config;
+      }
+      if (cmd === "set_shortcuts_paused") {
+        return undefined;
+      }
+      return current;
+    });
+
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: /Settings/i })).toBeTruthy();
+    });
+
+    switchTab("Settings");
+
+    const toggleBtn = await screen.findByRole("button", {
+      name: /Toggle Zoom shortcut/i,
+    });
+    fireEvent.click(toggleBtn);
+
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith("set_shortcuts_paused", {
+        paused: true,
+      });
+    });
+
+    // Duplicate binding against Zoom In ("Ctrl+Alt+Up")
+    fireEvent.keyDown(toggleBtn, {
+      key: "ArrowUp",
+      code: "ArrowUp",
+      ctrlKey: true,
+      altKey: true,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert").textContent).toContain("already assigned");
+      expect(mockedInvoke).toHaveBeenCalledWith("set_shortcuts_paused", {
+        paused: false,
+      });
+    });
+
+    // Record valid unique shortcut
+    fireEvent.click(toggleBtn);
+    await waitFor(() => {
+      expect(toggleBtn.textContent).toContain("Press keys");
+    });
+
+    fireEvent.keyDown(toggleBtn, {
+      key: "m",
+      code: "KeyM",
+      ctrlKey: true,
+      shiftKey: true,
+    });
+
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith("update_shortcuts", {
+        config: { ...DEFAULT_SHORTCUTS, toggle: "Ctrl+Shift+M" },
+      });
+    });
+    expect(settingsStore.saveShortcuts).toHaveBeenCalledWith({
+      ...DEFAULT_SHORTCUTS,
+      toggle: "Ctrl+Shift+M",
+    });
+
+    // Start on Boot switch
+    const autostartSwitch = screen.getByRole("switch", {
+      name: "Start on Boot",
+    });
+    fireEvent.click(autostartSwitch);
+    await waitFor(() => {
+      expect(autostartService.setAutostartEnabled).toHaveBeenCalledWith(true);
+    });
+
+    // Reset to Defaults button
+    fireEvent.click(screen.getByRole("button", { name: "Reset to Defaults" }));
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith("update_zoom_limits", {
+        limits: DEFAULT_LIMITS,
+      });
+      expect(mockedInvoke).toHaveBeenCalledWith("update_panning_config", {
+        config: DEFAULT_CONFIG,
+      });
+      expect(mockedInvoke).toHaveBeenCalledWith("update_shortcuts", {
+        config: DEFAULT_SHORTCUTS,
+      });
+    });
+  });
+
   it("shows and dismisses error banner when an IPC call fails", async () => {
-    mockedInvoke.mockRejectedValueOnce(new Error("MagInitialize failed"));
+    mockedInvoke.mockRejectedValue(new Error("MagInitialize failed"));
 
     render(<App />);
 

@@ -16,7 +16,10 @@
         "title": "Window Pointer Zoom",
         "width": 520,
         "height": 640,
-        "resizable": true
+        "minWidth": 460,
+        "minHeight": 540,
+        "resizable": true,
+        "visible": false
       }
     ],
     "security": {

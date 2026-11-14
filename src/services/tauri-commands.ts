@@ -1,27 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-
-export type PanningMode = "center_follow" | "edge_panning";
-
-export interface ZoomLimits {
-  minScale: number;
-  maxScale: number;
-}
-
-export interface PanningConfig {
-  mode: PanningMode;
-  zoomStep: number;
-  zoomAlpha: number;
-  panAlpha: number;
-  edgeDeadzone: number;
-}
-
-export interface ZoomStatus {
-  active: boolean;
-  targetScale: number;
-  currentScale: number;
-  config: PanningConfig;
-  limits: ZoomLimits;
-}
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type {
+  EngineSettingsSnapshot,
+  PanningConfig,
+  ShortcutConfig,
+  ZoomLimits,
+  ZoomStatus,
+} from "../types/settings";
 
 export function getZoomStatus(): Promise<ZoomStatus> {
   return invoke<ZoomStatus>("get_zoom_status");
@@ -45,4 +30,28 @@ export function setZoomLevel(scale: number): Promise<ZoomStatus> {
 
 export function updatePanningConfig(config: PanningConfig): Promise<ZoomStatus> {
   return invoke<ZoomStatus>("update_panning_config", { config });
+}
+
+export function getEngineSettings(): Promise<EngineSettingsSnapshot> {
+  return invoke<EngineSettingsSnapshot>("get_engine_settings");
+}
+
+export function updateZoomLimits(limits: ZoomLimits): Promise<ZoomStatus> {
+  return invoke<ZoomStatus>("update_zoom_limits", { limits });
+}
+
+export function updateShortcuts(config: ShortcutConfig): Promise<ShortcutConfig> {
+  return invoke<ShortcutConfig>("update_shortcuts", { config });
+}
+
+export function setShortcutsPaused(paused: boolean): Promise<void> {
+  return invoke<void>("set_shortcuts_paused", { paused });
+}
+
+export function subscribeZoomStatus(
+  onStatus: (status: ZoomStatus) => void,
+): Promise<UnlistenFn> {
+  return listen<ZoomStatus>("zoom-status-changed", (event) => {
+    onStatus(event.payload);
+  });
 }

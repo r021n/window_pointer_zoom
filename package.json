@@ -12,12 +12,24 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@radix-ui/react-label": "^2.1.17",
+    "@radix-ui/react-select": "^2.4.1",
+    "@radix-ui/react-slider": "^1.6.1",
+    "@radix-ui/react-switch": "^1.4.1",
+    "@radix-ui/react-tabs": "^1.2.1",
     "@tauri-apps/api": "^2.12.0",
+    "@tauri-apps/plugin-autostart": "^2.7.0",
+    "@tauri-apps/plugin-store": "^2.5.1",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.72.0",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "tailwind-merge": "^3.7.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@tailwindcss/vite": "^4.3.5",
     "@tauri-apps/cli": "^2.12.0",
     "@testing-library/dom": "^10.0.0",
     "@testing-library/react": "^16.3.0",
@@ -29,6 +41,7 @@
     "eslint-plugin-react-hooks": "^7.0.0",
     "globals": "^17.0.0",
     "jsdom": "^28.0.0",
+    "tailwindcss": "^4.3.5",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.72.0",
     "vite": "^8.0.0",

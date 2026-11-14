@@ -1,27 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createThrottle, formatError } from "../lib/utils";
 import {
   getZoomStatus,
   resetZoom as invokeResetZoom,
   setZoomLevel as invokeSetZoomLevel,
-  updatePanningConfig as invokeUpdatePanningConfig,
+  subscribeZoomStatus,
   zoomIn as invokeZoomIn,
   zoomOut as invokeZoomOut,
-  type PanningConfig,
-  type ZoomStatus,
 } from "../services/tauri-commands";
+import { SCALE_EPSILON, type ZoomStatus } from "../types/settings";
 
 const POLL_INTERVAL_MS = 100;
-const SCALE_SETTLE_EPSILON = 0.001;
-
-function formatError(err: unknown): string {
-  if (err instanceof Error && err.message) {
-    return err.message;
-  }
-  if (typeof err === "string" && err.length > 0) {
-    return err;
-  }
-  return "An unexpected error occurred while communicating with the zoom engine.";
-}
+const ZOOM_SLIDER_THROTTLE_MS = 60;
 
 export interface ZoomController {
   status: ZoomStatus | null;
@@ -30,11 +20,15 @@ export interface ZoomController {
   zoomIn: () => Promise<void>;
   zoomOut: () => Promise<void>;
   resetZoom: () => Promise<void>;
-  setZoomLevel: (scale: number) => Promise<void>;
-  updatePanningConfig: (config: PanningConfig) => Promise<void>;
+  setZoomLevel: (scale: number) => void;
+  syncStatus: (nextStatus: ZoomStatus) => void;
   clearError: () => void;
 }
 
+/**
+ * Manages live zoom engine state, `zoom-status-changed` event subscriptions,
+ * animation settling polls, and throttled `set_zoom_level` actions.
+ */
 export function useZoomController(): ZoomController {
   const [status, setStatus] = useState<ZoomStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -61,49 +55,13 @@ export function useZoomController(): ZoomController {
     setError(formatError(err));
   }, []);
 
-  useEffect(() => {
-    mountedRef.current = true;
+  const refreshStatus = useCallback(() => {
     const seq = ++statusSeqRef.current;
 
-    void getZoomStatus()
-      .then((initialStatus) => applyResponse(seq, initialStatus))
+    return getZoomStatus()
+      .then((nextStatus) => applyResponse(seq, nextStatus))
       .catch((err) => applyError(seq, err));
-
-    return () => {
-      mountedRef.current = false;
-    };
   }, [applyError, applyResponse]);
-
-  const shouldPoll = Boolean(
-    status?.active &&
-      Math.abs(status.currentScale - status.targetScale) > SCALE_SETTLE_EPSILON,
-  );
-
-  useEffect(() => {
-    if (!shouldPoll) {
-      return;
-    }
-
-    const intervalId = window.setInterval(() => {
-      if (pollInFlightRef.current || pendingMutationsRef.current > 0) {
-        return;
-      }
-
-      pollInFlightRef.current = true;
-      const seq = ++statusSeqRef.current;
-
-      void getZoomStatus()
-        .then((nextStatus) => applyResponse(seq, nextStatus))
-        .catch((err) => applyError(seq, err))
-        .finally(() => {
-          pollInFlightRef.current = false;
-        });
-    }, POLL_INTERVAL_MS);
-
-    return () => {
-      window.clearInterval(intervalId);
-    };
-  }, [applyError, applyResponse, shouldPoll]);
 
   const runAction = useCallback(
     async (action: () => Promise<ZoomStatus>) => {
@@ -126,17 +84,125 @@ export function useZoomController(): ZoomController {
     [applyError, applyResponse],
   );
 
-  const zoomIn = useCallback(() => runAction(invokeZoomIn), [runAction]);
-  const zoomOut = useCallback(() => runAction(invokeZoomOut), [runAction]);
-  const resetZoom = useCallback(() => runAction(invokeResetZoom), [runAction]);
-  const setZoomLevel = useCallback(
-    (scale: number) => runAction(() => invokeSetZoomLevel(scale)),
-    [runAction],
+  const runActionRef = useRef(runAction);
+  useEffect(() => {
+    runActionRef.current = runAction;
+  }, [runAction]);
+
+  const throttledSetZoomRef = useRef<ReturnType<
+    typeof createThrottle<[number]>
+  > | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+
+    throttledSetZoomRef.current = createThrottle((scale: number) => {
+      void runActionRef.current(() => invokeSetZoomLevel(scale));
+    }, ZOOM_SLIDER_THROTTLE_MS);
+
+    void refreshStatus();
+
+    void subscribeZoomStatus((nextStatus) => {
+      if (cancelled) {
+        return;
+      }
+      const seq = ++statusSeqRef.current;
+      applyResponse(seq, nextStatus);
+    })
+      .then((fn) => {
+        if (cancelled) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          applyError(statusSeqRef.current, err);
+        }
+      });
+
+    const handleVisibilityChange = () => {
+      if (
+        document.visibilityState === "visible" &&
+        pendingMutationsRef.current === 0
+      ) {
+        void refreshStatus();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      cancelled = true;
+      mountedRef.current = false;
+      throttledSetZoomRef.current?.cancel();
+      throttledSetZoomRef.current = null;
+      unlisten?.();
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [applyError, applyResponse, refreshStatus]);
+
+  const shouldPoll = Boolean(
+    status?.active &&
+      Math.abs(status.currentScale - status.targetScale) > SCALE_EPSILON,
   );
-  const updatePanningConfig = useCallback(
-    (config: PanningConfig) => runAction(() => invokeUpdatePanningConfig(config)),
-    [runAction],
+
+  useEffect(() => {
+    if (!shouldPoll) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      if (pollInFlightRef.current || pendingMutationsRef.current > 0) {
+        return;
+      }
+
+      pollInFlightRef.current = true;
+
+      void refreshStatus().finally(() => {
+        pollInFlightRef.current = false;
+      });
+    }, POLL_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [refreshStatus, shouldPoll]);
+
+  const zoomIn = useCallback(() => {
+    throttledSetZoomRef.current?.cancel();
+    return runAction(invokeZoomIn);
+  }, [runAction]);
+
+  const zoomOut = useCallback(() => {
+    throttledSetZoomRef.current?.cancel();
+    return runAction(invokeZoomOut);
+  }, [runAction]);
+
+  const resetZoom = useCallback(() => {
+    throttledSetZoomRef.current?.cancel();
+    return runAction(invokeResetZoom);
+  }, [runAction]);
+
+  const setZoomLevel = useCallback((scale: number) => {
+    if (throttledSetZoomRef.current) {
+      throttledSetZoomRef.current.call(scale);
+    } else {
+      void runActionRef.current(() => invokeSetZoomLevel(scale));
+    }
+  }, []);
+
+  const syncStatus = useCallback(
+    (nextStatus: ZoomStatus) => {
+      const seq = ++statusSeqRef.current;
+      applyResponse(seq, nextStatus);
+    },
+    [applyResponse],
   );
+
   const clearError = useCallback(() => setError(null), []);
 
   return {
@@ -147,7 +213,7 @@ export function useZoomController(): ZoomController {
     zoomOut,
     resetZoom,
     setZoomLevel,
-    updatePanningConfig,
+    syncStatus,
     clearError,
   };
 }

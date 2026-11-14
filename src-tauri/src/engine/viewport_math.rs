@@ -4,7 +4,8 @@
 use serde::{Deserialize, Serialize};
 
 pub const ZOOM_SNAP_EPSILON: f32 = 0.001;
-const MAX_EDGE_DEADZONE_RATIO: f32 = 0.45;
+pub const MIN_EDGE_DEADZONE_RATIO: f32 = 0.05;
+pub const MAX_EDGE_DEADZONE_RATIO: f32 = 0.45;
 
 /// Physical pixel dimensions of the target screen.
 #[derive(Debug, Clone, Copy, PartialEq)]

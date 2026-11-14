@@ -8,10 +8,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::spawn_engine;
 pub use crate::engine::viewport_math::PanningMode;
-use crate::engine::viewport_math::ZOOM_SNAP_EPSILON;
+use crate::engine::viewport_math::{
+    MAX_EDGE_DEADZONE_RATIO, MIN_EDGE_DEADZONE_RATIO, ZOOM_SNAP_EPSILON,
+};
+use crate::shortcuts::ShortcutConfig;
 
-pub const MIN_ZOOM_SCALE: f32 = 1.0;
-pub const MAX_ZOOM_SCALE: f32 = 5.0;
+pub const UNMAGNIFIED_SCALE: f32 = 1.0;
+pub const MIN_SCALE_ENVELOPE: f32 = 1.0;
+pub const MAX_SCALE_ENVELOPE: f32 = 10.0;
+pub const DEFAULT_MIN_ZOOM_SCALE: f32 = 1.0;
+pub const DEFAULT_TOGGLE_SCALE: f32 = 2.0;
+pub const DEFAULT_MAX_ZOOM_SCALE: f32 = 5.0;
 pub const DEFAULT_ZOOM_STEP: f32 = 0.25;
 pub const DEFAULT_ZOOM_ALPHA: f32 = 0.15;
 pub const DEFAULT_PAN_ALPHA: f32 = 0.25;
@@ -22,8 +29,6 @@ const MIN_ZOOM_STEP: f32 = 0.05;
 const MAX_ZOOM_STEP: f32 = 2.0;
 const MIN_ALPHA: f32 = 0.01;
 const MAX_ALPHA: f32 = 1.0;
-const MIN_EDGE_DEADZONE: f32 = 0.05;
-const MAX_EDGE_DEADZONE: f32 = 0.45;
 
 fn sanitize_clamped(value: f32, min: f32, max: f32, default: f32) -> f32 {
     if value.is_finite() {
@@ -33,26 +38,60 @@ fn sanitize_clamped(value: f32, min: f32, max: f32, default: f32) -> f32 {
     }
 }
 
-/// Allowed zoom scale range exposed to the UI.
+/// Allowed zoom scale range and default toggle target exposed to the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct ZoomLimits {
     pub min_scale: f32,
+    pub default_scale: f32,
     pub max_scale: f32,
 }
 
 impl Default for ZoomLimits {
     fn default() -> Self {
         Self {
-            min_scale: MIN_ZOOM_SCALE,
-            max_scale: MAX_ZOOM_SCALE,
+            min_scale: DEFAULT_MIN_ZOOM_SCALE,
+            default_scale: DEFAULT_TOGGLE_SCALE,
+            max_scale: DEFAULT_MAX_ZOOM_SCALE,
+        }
+    }
+}
+
+impl ZoomLimits {
+    /// Enforces finite bounds and `1.0 <= min_scale <= default_scale <= max_scale <= 10.0`.
+    pub fn sanitized(self) -> Self {
+        let mut min_scale = sanitize_clamped(
+            self.min_scale,
+            MIN_SCALE_ENVELOPE,
+            MAX_SCALE_ENVELOPE,
+            DEFAULT_MIN_ZOOM_SCALE,
+        );
+        let mut max_scale = sanitize_clamped(
+            self.max_scale,
+            MIN_SCALE_ENVELOPE,
+            MAX_SCALE_ENVELOPE,
+            DEFAULT_MAX_ZOOM_SCALE,
+        );
+        if min_scale > max_scale {
+            std::mem::swap(&mut min_scale, &mut max_scale);
+        }
+        let default_raw = if self.default_scale.is_finite() {
+            self.default_scale
+        } else {
+            DEFAULT_TOGGLE_SCALE
+        };
+        let default_scale = default_raw.clamp(min_scale, max_scale);
+        Self {
+            min_scale,
+            default_scale,
+            max_scale,
         }
     }
 }
 
 /// User-configurable zoom and cursor-panning settings.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct PanningConfig {
     pub mode: PanningMode,
     pub zoom_step: f32,
@@ -88,11 +127,70 @@ impl PanningConfig {
             pan_alpha: sanitize_clamped(self.pan_alpha, MIN_ALPHA, MAX_ALPHA, DEFAULT_PAN_ALPHA),
             edge_deadzone: sanitize_clamped(
                 self.edge_deadzone,
-                MIN_EDGE_DEADZONE,
-                MAX_EDGE_DEADZONE,
+                MIN_EDGE_DEADZONE_RATIO,
+                MAX_EDGE_DEADZONE_RATIO,
                 DEFAULT_EDGE_DEADZONE,
             ),
         }
+    }
+}
+
+/// Persisted `"engineSettings"` payload stored in `settings.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PersistedEngineSettings {
+    pub limits: ZoomLimits,
+    pub panning: PanningConfig,
+}
+
+/// Numeric slider bounds and step increments shared with the frontend.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RangeBounds {
+    pub min: f32,
+    pub max: f32,
+    pub step: f32,
+}
+
+/// Canonical limits and default presets exposed so the UI never duplicates backend bounds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigConstraints {
+    pub scale_envelope: RangeBounds,
+    pub zoom_step: RangeBounds,
+    pub alpha: RangeBounds,
+    pub edge_deadzone: RangeBounds,
+    pub default_limits: ZoomLimits,
+    pub default_panning: PanningConfig,
+    pub default_shortcuts: ShortcutConfig,
+}
+
+/// Returns the canonical constraints and defaults for engine and shortcut configuration.
+pub fn config_constraints() -> ConfigConstraints {
+    ConfigConstraints {
+        scale_envelope: RangeBounds {
+            min: MIN_SCALE_ENVELOPE,
+            max: MAX_SCALE_ENVELOPE,
+            step: 0.1,
+        },
+        zoom_step: RangeBounds {
+            min: MIN_ZOOM_STEP,
+            max: MAX_ZOOM_STEP,
+            step: 0.05,
+        },
+        alpha: RangeBounds {
+            min: MIN_ALPHA,
+            max: MAX_ALPHA,
+            step: 0.01,
+        },
+        edge_deadzone: RangeBounds {
+            min: MIN_EDGE_DEADZONE_RATIO,
+            max: MAX_EDGE_DEADZONE_RATIO,
+            step: 0.01,
+        },
+        default_limits: ZoomLimits::default(),
+        default_panning: PanningConfig::default(),
+        default_shortcuts: ShortcutConfig::default(),
     }
 }
 
@@ -107,22 +205,45 @@ pub struct ZoomStatus {
     pub limits: ZoomLimits,
 }
 
+/// Combined hydration snapshot fetched once by the frontend on mount.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineSettingsSnapshot {
+    pub status: ZoomStatus,
+    pub shortcuts: ShortcutConfig,
+    pub constraints: ConfigConstraints,
+}
+
+/// High-level zoom action shared across shortcuts, tray menu, and wheel triggers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoomAction {
+    Toggle,
+    ZoomIn,
+    ZoomOut,
+    Reset,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct EngineControl {
     target_scale: f32,
     current_scale: f32,
+    last_toggle_scale: f32,
     is_animating: bool,
     config: PanningConfig,
+    limits: ZoomLimits,
     shutdown: bool,
 }
 
 impl Default for EngineControl {
     fn default() -> Self {
+        let limits = ZoomLimits::default();
         Self {
-            target_scale: MIN_ZOOM_SCALE,
-            current_scale: MIN_ZOOM_SCALE,
+            target_scale: UNMAGNIFIED_SCALE,
+            current_scale: UNMAGNIFIED_SCALE,
+            last_toggle_scale: limits.default_scale,
             is_animating: false,
             config: PanningConfig::default(),
+            limits,
             shutdown: false,
         }
     }
@@ -131,16 +252,20 @@ impl Default for EngineControl {
 impl EngineControl {
     fn to_status(self) -> ZoomStatus {
         ZoomStatus {
-            active: self.target_scale > MIN_ZOOM_SCALE || self.is_animating,
+            active: self.target_scale > UNMAGNIFIED_SCALE || self.is_animating,
             target_scale: self.target_scale,
             current_scale: self.current_scale,
             config: self.config,
-            limits: ZoomLimits::default(),
+            limits: self.limits,
         }
     }
 
     fn set_target_scale(&mut self, next_scale: f32) {
-        let clamped = next_scale.clamp(MIN_ZOOM_SCALE, MAX_ZOOM_SCALE);
+        let clamped = if !next_scale.is_finite() || next_scale <= UNMAGNIFIED_SCALE {
+            UNMAGNIFIED_SCALE
+        } else {
+            next_scale.clamp(self.limits.min_scale, self.limits.max_scale)
+        };
         self.target_scale = clamped;
         if (clamped - self.current_scale).abs() >= ZOOM_SNAP_EPSILON {
             self.is_animating = true;
@@ -181,7 +306,7 @@ impl SharedEngine {
             if guard.shutdown {
                 return None;
             }
-            if guard.target_scale > MIN_ZOOM_SCALE || guard.is_animating {
+            if guard.target_scale > UNMAGNIFIED_SCALE || guard.is_animating {
                 return Some((guard.target_scale, guard.config));
             }
             guard = self
@@ -195,8 +320,8 @@ impl SharedEngine {
     /// Returns `true` if shutdown was requested.
     pub fn finish_settled_and_check_shutdown(&self) -> bool {
         let mut guard = self.lock_control();
-        guard.current_scale = MIN_ZOOM_SCALE;
-        guard.is_animating = guard.target_scale > MIN_ZOOM_SCALE;
+        guard.current_scale = UNMAGNIFIED_SCALE;
+        guard.is_animating = guard.target_scale > UNMAGNIFIED_SCALE;
         guard.shutdown
     }
 
@@ -269,22 +394,68 @@ impl AppState {
         self.shared.lock_control().to_status()
     }
 
-    /// Increases the target zoom scale by `config.zoom_step`, clamped to `[MIN_ZOOM_SCALE, MAX_ZOOM_SCALE]`.
+    /// Increases the target zoom scale by `config.zoom_step`, clamping into `[limits.min_scale, limits.max_scale]`.
     pub fn zoom_in(&self) -> Result<ZoomStatus, String> {
-        Ok(self.update_target(|c| c.target_scale + c.config.zoom_step))
+        Ok(self.update_target(|c| {
+            let base = if c.target_scale <= UNMAGNIFIED_SCALE {
+                UNMAGNIFIED_SCALE
+            } else {
+                c.target_scale
+            };
+            (base + c.config.zoom_step).clamp(c.limits.min_scale, c.limits.max_scale)
+        }))
     }
 
-    /// Decreases the target zoom scale by `config.zoom_step`, clamped to `[MIN_ZOOM_SCALE, MAX_ZOOM_SCALE]`.
+    /// Decreases the target zoom scale by `config.zoom_step`, returning to `1.0` when stepping below `limits.min_scale`.
     pub fn zoom_out(&self) -> Result<ZoomStatus, String> {
-        Ok(self.update_target(|c| c.target_scale - c.config.zoom_step))
+        Ok(self.update_target(|c| {
+            if c.target_scale <= UNMAGNIFIED_SCALE {
+                return UNMAGNIFIED_SCALE;
+            }
+            let next = c.target_scale - c.config.zoom_step;
+            if next < c.limits.min_scale - ZOOM_SNAP_EPSILON {
+                UNMAGNIFIED_SCALE
+            } else {
+                next.clamp(c.limits.min_scale, c.limits.max_scale)
+            }
+        }))
     }
 
-    /// Smoothly resets target zoom scale back to `MIN_ZOOM_SCALE` (`1.0`).
+    /// Smoothly resets target zoom scale back to `UNMAGNIFIED_SCALE` (`1.0`).
     pub fn reset_zoom(&self) -> Result<ZoomStatus, String> {
-        Ok(self.update_target(|_| MIN_ZOOM_SCALE))
+        Ok(self.update_target(|_| UNMAGNIFIED_SCALE))
     }
 
-    /// Sets the target zoom scale explicitly, rejecting non-finite inputs and clamping finite values.
+    /// Toggles between `UNMAGNIFIED_SCALE` (`1.0`) and `last_toggle_scale` within active limits.
+    pub fn toggle_zoom(&self) -> Result<ZoomStatus, String> {
+        Ok(self.update_target(|c| {
+            if c.target_scale > UNMAGNIFIED_SCALE {
+                c.last_toggle_scale = c
+                    .target_scale
+                    .clamp(c.limits.min_scale, c.limits.max_scale);
+                UNMAGNIFIED_SCALE
+            } else if c.last_toggle_scale > UNMAGNIFIED_SCALE {
+                c.last_toggle_scale
+                    .clamp(c.limits.min_scale, c.limits.max_scale)
+            } else {
+                c.limits
+                    .default_scale
+                    .clamp(c.limits.min_scale, c.limits.max_scale)
+            }
+        }))
+    }
+
+    /// Dispatches a high-level `ZoomAction` to the corresponding state mutation.
+    pub fn apply_action(&self, action: ZoomAction) -> Result<ZoomStatus, String> {
+        match action {
+            ZoomAction::Toggle => self.toggle_zoom(),
+            ZoomAction::ZoomIn => self.zoom_in(),
+            ZoomAction::ZoomOut => self.zoom_out(),
+            ZoomAction::Reset => self.reset_zoom(),
+        }
+    }
+
+    /// Sets the target zoom scale explicitly (`<= 1.0` resets to `1.0`; `> 1.0` clamps to active limits).
     pub fn set_zoom_level(&self, scale: f32) -> Result<ZoomStatus, String> {
         if !scale.is_finite() {
             return Err(format!("Zoom scale must be a finite number, got {scale}"));
@@ -297,8 +468,36 @@ impl AppState {
         let sanitized = config.sanitized();
         let mut guard = self.shared.lock_control();
         guard.config = sanitized;
-        if guard.target_scale > MIN_ZOOM_SCALE || guard.is_animating {
+        if guard.target_scale > UNMAGNIFIED_SCALE || guard.is_animating {
             self.shared.wake.notify_one();
+        }
+        Ok(guard.to_status())
+    }
+
+    /// Sanitizes and updates `ZoomLimits`, re-clamping active target and toggle memory as needed.
+    pub fn update_zoom_limits(&self, limits: ZoomLimits) -> Result<ZoomStatus, String> {
+        let sanitized = limits.sanitized();
+        let mut guard = self.shared.lock_control();
+        let default_changed =
+            (sanitized.default_scale - guard.limits.default_scale).abs() > ZOOM_SNAP_EPSILON;
+        guard.limits = sanitized;
+        if default_changed {
+            guard.last_toggle_scale = sanitized.default_scale;
+        } else {
+            guard.last_toggle_scale = guard
+                .last_toggle_scale
+                .clamp(sanitized.min_scale, sanitized.max_scale);
+        }
+
+        if guard.target_scale > UNMAGNIFIED_SCALE {
+            let prev_target = guard.target_scale;
+            let reclamped = prev_target.clamp(sanitized.min_scale, sanitized.max_scale);
+            if (reclamped - prev_target).abs() > ZOOM_SNAP_EPSILON {
+                guard.set_target_scale(reclamped);
+                self.shared.wake.notify_one();
+            } else {
+                guard.target_scale = reclamped;
+            }
         }
         Ok(guard.to_status())
     }
@@ -318,12 +517,12 @@ impl AppState {
 
     fn update_target<F>(&self, next_fn: F) -> ZoomStatus
     where
-        F: FnOnce(&EngineControl) -> f32,
+        F: FnOnce(&mut EngineControl) -> f32,
     {
         let mut guard = self.shared.lock_control();
-        let next = next_fn(&guard);
+        let next = next_fn(&mut guard);
         guard.set_target_scale(next);
-        if guard.target_scale > MIN_ZOOM_SCALE || guard.is_animating {
+        if guard.target_scale > UNMAGNIFIED_SCALE || guard.is_animating {
             self.shared.wake.notify_one();
         }
         guard.to_status()
@@ -345,13 +544,14 @@ mod tests {
         let state = AppState::new();
         let initial = state.status();
         assert!(!initial.active);
-        assert_eq!(initial.target_scale, MIN_ZOOM_SCALE);
-        assert_eq!(initial.current_scale, MIN_ZOOM_SCALE);
+        assert_eq!(initial.target_scale, UNMAGNIFIED_SCALE);
+        assert_eq!(initial.current_scale, UNMAGNIFIED_SCALE);
         assert_eq!(
             initial.limits,
             ZoomLimits {
-                min_scale: MIN_ZOOM_SCALE,
-                max_scale: MAX_ZOOM_SCALE,
+                min_scale: DEFAULT_MIN_ZOOM_SCALE,
+                default_scale: DEFAULT_TOGGLE_SCALE,
+                max_scale: DEFAULT_MAX_ZOOM_SCALE,
             }
         );
 
@@ -360,16 +560,123 @@ mod tests {
         assert_eq!(after_in.target_scale, 1.25);
 
         let clamped_high = state.set_zoom_level(99.0).expect("finite scale clamps");
-        assert_eq!(clamped_high.target_scale, MAX_ZOOM_SCALE);
+        assert_eq!(clamped_high.target_scale, DEFAULT_MAX_ZOOM_SCALE);
 
         let after_step_over_max = state.zoom_in().expect("zoom_in clamps at max");
-        assert_eq!(after_step_over_max.target_scale, MAX_ZOOM_SCALE);
+        assert_eq!(after_step_over_max.target_scale, DEFAULT_MAX_ZOOM_SCALE);
 
         let clamped_low = state.set_zoom_level(-3.0).expect("finite scale clamps");
-        assert_eq!(clamped_low.target_scale, MIN_ZOOM_SCALE);
+        assert_eq!(clamped_low.target_scale, UNMAGNIFIED_SCALE);
 
         let after_out_at_min = state.zoom_out().expect("zoom_out clamps at min");
-        assert_eq!(after_out_at_min.target_scale, MIN_ZOOM_SCALE);
+        assert_eq!(after_out_at_min.target_scale, UNMAGNIFIED_SCALE);
+    }
+
+    #[test]
+    fn zoom_limits_sanitized_enforces_ordering_and_envelope() {
+        let inverted = ZoomLimits {
+            min_scale: 8.0,
+            default_scale: 1.5,
+            max_scale: 3.0,
+        };
+        assert_eq!(
+            inverted.sanitized(),
+            ZoomLimits {
+                min_scale: 3.0,
+                default_scale: 3.0,
+                max_scale: 8.0,
+            }
+        );
+
+        let out_of_envelope = ZoomLimits {
+            min_scale: 0.2,
+            default_scale: 99.0,
+            max_scale: 42.0,
+        };
+        assert_eq!(
+            out_of_envelope.sanitized(),
+            ZoomLimits {
+                min_scale: MIN_SCALE_ENVELOPE,
+                default_scale: MAX_SCALE_ENVELOPE,
+                max_scale: MAX_SCALE_ENVELOPE,
+            }
+        );
+
+        let non_finite = ZoomLimits {
+            min_scale: f32::NAN,
+            default_scale: f32::INFINITY,
+            max_scale: f32::NEG_INFINITY,
+        };
+        assert_eq!(
+            non_finite.sanitized(),
+            ZoomLimits {
+                min_scale: DEFAULT_MIN_ZOOM_SCALE,
+                default_scale: DEFAULT_TOGGLE_SCALE,
+                max_scale: DEFAULT_MAX_ZOOM_SCALE,
+            }
+        );
+    }
+
+    #[test]
+    fn elevated_min_scale_handles_step_set_reset_toggle_and_reclamp() {
+        let state = AppState::new();
+        let limits = ZoomLimits {
+            min_scale: 1.5,
+            default_scale: 2.5,
+            max_scale: 4.0,
+        };
+        let updated = state
+            .update_zoom_limits(limits)
+            .expect("update_zoom_limits succeeds");
+        assert_eq!(updated.limits, limits);
+        assert_eq!(updated.target_scale, UNMAGNIFIED_SCALE);
+
+        // zoom_out when unmagnified stays at 1.0 (never zooms IN to min_scale).
+        let out_when_idle = state.zoom_out().expect("zoom_out succeeds");
+        assert_eq!(out_when_idle.target_scale, UNMAGNIFIED_SCALE);
+
+        // zoom_in from 1.0 jumps into [min_scale, max_scale].
+        let in_from_idle = state.zoom_in().expect("zoom_in succeeds");
+        assert_eq!(in_from_idle.target_scale, 1.5);
+
+        // zoom_out from min_scale steps cleanly back to 1.0.
+        let back_to_idle = state.zoom_out().expect("zoom_out succeeds");
+        assert_eq!(back_to_idle.target_scale, UNMAGNIFIED_SCALE);
+
+        // toggle_zoom uses updated default_scale (2.5), then back to 1.0.
+        let toggled_on = state.toggle_zoom().expect("toggle on succeeds");
+        assert_eq!(toggled_on.target_scale, 2.5);
+        let toggled_off = state.toggle_zoom().expect("toggle off succeeds");
+        assert_eq!(toggled_off.target_scale, UNMAGNIFIED_SCALE);
+
+        // set_zoom_level clamps > 1.0 into [1.5, 4.0] and <= 1.0 to 1.0.
+        assert_eq!(
+            state.set_zoom_level(1.2).expect("set_zoom_level").target_scale,
+            1.5
+        );
+        assert_eq!(
+            state.set_zoom_level(6.0).expect("set_zoom_level").target_scale,
+            4.0
+        );
+        assert_eq!(
+            state.set_zoom_level(1.0).expect("set_zoom_level").target_scale,
+            UNMAGNIFIED_SCALE
+        );
+
+        // Updating limits while magnified re-clamps active target_scale.
+        state.set_zoom_level(3.5).expect("zoom to 3.5");
+        let reclamped = state
+            .update_zoom_limits(ZoomLimits {
+                min_scale: 1.5,
+                default_scale: 2.0,
+                max_scale: 3.0,
+            })
+            .expect("reclamp succeeds");
+        assert_eq!(reclamped.target_scale, 3.0);
+
+        // reset_zoom always goes to 1.0 even when min_scale > 1.0.
+        let reset = state.reset_zoom().expect("reset succeeds");
+        assert_eq!(reset.target_scale, UNMAGNIFIED_SCALE);
     }
 
     #[test]
@@ -401,7 +708,7 @@ mod tests {
                 zoom_step: MAX_ZOOM_STEP,
                 zoom_alpha: MIN_ALPHA,
                 pan_alpha: DEFAULT_PAN_ALPHA,
-                edge_deadzone: MAX_EDGE_DEADZONE,
+                edge_deadzone: MAX_EDGE_DEADZONE_RATIO,
             }
         );
 
@@ -435,7 +742,7 @@ mod tests {
 
         // Reset zoom while current_scale is still 2.0x: target becomes 1.0x, active stays true.
         let during_reset = state.reset_zoom().expect("reset_zoom succeeds");
-        assert_eq!(during_reset.target_scale, MIN_ZOOM_SCALE);
+        assert_eq!(during_reset.target_scale, UNMAGNIFIED_SCALE);
         assert_eq!(during_reset.current_scale, 2.0);
         assert!(during_reset.active);
 
@@ -443,8 +750,8 @@ mod tests {
         assert!(!state.shared.finish_settled_and_check_shutdown());
         let settled = state.status();
         assert!(!settled.active);
-        assert_eq!(settled.current_scale, MIN_ZOOM_SCALE);
-        assert_eq!(settled.target_scale, MIN_ZOOM_SCALE);
+        assert_eq!(settled.current_scale, UNMAGNIFIED_SCALE);
+        assert_eq!(settled.target_scale, UNMAGNIFIED_SCALE);
     }
 
     #[test]
@@ -463,5 +770,58 @@ mod tests {
         state.shutdown();
         state.shutdown();
         assert!(state.worker.lock().expect("lock worker").is_none());
+    }
+
+    #[test]
+    fn toggle_zoom_switches_between_min_and_last_scale() {
+        let state = AppState::new();
+        assert_eq!(state.status().target_scale, UNMAGNIFIED_SCALE);
+
+        let zoomed = state.toggle_zoom().expect("toggle on succeeds");
+        assert_eq!(zoomed.target_scale, DEFAULT_TOGGLE_SCALE);
+        assert!(zoomed.active);
+
+        let unzoomed = state.toggle_zoom().expect("toggle off succeeds");
+        assert_eq!(unzoomed.target_scale, UNMAGNIFIED_SCALE);
+
+        state.set_zoom_level(2.75).expect("custom scale succeeds");
+        let saved_off = state.toggle_zoom().expect("toggle saves custom scale");
+        assert_eq!(saved_off.target_scale, UNMAGNIFIED_SCALE);
+
+        let restored = state.toggle_zoom().expect("toggle restores custom scale");
+        assert_eq!(restored.target_scale, 2.75);
+    }
+
+    #[test]
+    fn toggle_zoom_falls_back_to_default_if_last_scale_not_above_min() {
+        let state = AppState::new();
+        state.shared.lock_control().last_toggle_scale = UNMAGNIFIED_SCALE;
+        let zoomed = state.toggle_zoom().expect("toggle falls back to default");
+        assert_eq!(zoomed.target_scale, DEFAULT_TOGGLE_SCALE);
+    }
+
+    #[test]
+    fn apply_action_dispatches_all_variants() {
+        let state = AppState::new();
+
+        let toggled = state
+            .apply_action(ZoomAction::Toggle)
+            .expect("toggle action succeeds");
+        assert_eq!(toggled.target_scale, DEFAULT_TOGGLE_SCALE);
+
+        let zoomed_in = state
+            .apply_action(ZoomAction::ZoomIn)
+            .expect("zoom_in action succeeds");
+        assert_eq!(zoomed_in.target_scale, DEFAULT_TOGGLE_SCALE + DEFAULT_ZOOM_STEP);
+
+        let zoomed_out = state
+            .apply_action(ZoomAction::ZoomOut)
+            .expect("zoom_out action succeeds");
+        assert_eq!(zoomed_out.target_scale, DEFAULT_TOGGLE_SCALE);
+
+        let reset = state
+            .apply_action(ZoomAction::Reset)
+            .expect("reset action succeeds");
+        assert_eq!(reset.target_scale, UNMAGNIFIED_SCALE);
     }
 }

@@ -184,7 +184,8 @@ Ketika layar diperbesar dengan faktor $\text{scale} > 1.0$:
 *Fokus: Memastikan klik mouse akurat saat layar diperbesar dan kompatibel dengan setup monitor yang beragam.*
 * **Aktivitas yang dikerjakan:**
   - **Akurasi Klik Mouse (Input Coordinate Mapping):**  
-    Ketika layar diperbesar secara penuh via `MagSetFullscreenTransform`, memeriksa dan menangani pemetaan klik agar klik mouse tetap mengenai target yang benar pada aplikasi di bawahnya (menguji `MagSetInputTransform` atau mapping native koordinat).
+    Ketika layar diperbesar secara penuh via `MagSetFullscreenTransform`, memeriksa dan menangani pemetaan klik agar klik mouse tetap mengenai target yang benar pada aplikasi di bawahnya dengan memanggil `MagSetInputTransform(TRUE, &pRectSource, &pRectDest)` yang disinkronkan dengan transformasi viewport.
+    - **Catatan Teknis & Keterbatasan Windows OS:** Pada Windows 10 (1703+) & Windows 11, tanpa `MagSetInputTransform`, OS merutekan klik mouse ke koordinat desktop asli (*unmagnified*), bukan ke posisi visual yang di-zoom (sehingga area seperti baris teratas File Explorer mode *Details* bisa gagal diklik/diseleksi seiring kenaikan faktor zoom). Selain itu, `MagSetInputTransform` **wajib memiliki hak `UIAccess`** (jika tidak, Windows menolak dengan `ERROR_ACCESS_DENIED`, bahkan saat dijalankan sebagai Administrator biasa). Oleh karena itu, pemanggilan `MagSetInputTransform` harus melakukan *graceful fallback* pada build dev lokal (*unsigned*) agar fungsi zoom tetap berjalan normal, sedangkan akurasi klik penuh baru dapat diverifikasi pada build ter-sign dengan `UIAccess` (lihat Fase 6). Komponen WinUI/XAML Islands pada bar atas File Explorer Windows 11 juga memiliki perilaku *hit-testing* bawaan OS di bawah fullscreen magnification yang berada di luar kendali aplikasi.
   - **Per-Monitor DPI Awareness:**  
     Memastikan kalkulasi offset viewport akurat pada display dengan scaling DPI 125%, 150%, 175%, atau 200%.
   - **Multi-Monitor Handling:**  
@@ -192,7 +193,7 @@ Ketika layar diperbesar dengan faktor $\text{scale} > 1.0$:
   - **Clean Shutdown:**  
     Memastikan saat aplikasi keluar (*exit*), layar otomatis kembali ke 1.0x secara instan dan memanggil `MagUninitialize()`.
 * **Output / Definition of Done (DoD):**
-  - [ ] Klik mouse pada tombol atau teks saat layar diperbesar tetap presisi.
+  - [ ] Klik mouse pada tombol atau teks saat layar diperbesar tetap presisi (diuji pada build ter-sign dengan `UIAccess` aktif di lokasi instalasi terlindungi; build dev lokal *unsigned* hanya memvalidasi *graceful fallback* tanpa crash).
   - [ ] Berjalan stabil pada monitor high-DPI (laptop 1080p 125% maupun 4K).
   - [ ] Tidak ada distorsi layar saat aplikasi ditutup.
 
@@ -203,7 +204,11 @@ Ketika layar diperbesar dengan faktor $\text{scale} > 1.0$:
 * **Aktivitas yang dikerjakan:**
   - Menyiapkan icon pack aplikasi (`.ico`).
   - Mengonfigurasi bundler Tauri 2.0 untuk menghasilkan installer **NSIS (`.exe`)** dan **MSI (`.msi`)**.
-  - Menyertakan konfigurasi manifest Windows (`requestedExecutionLevel` / `UIAccess` jika dibutuhkan untuk input transform).
+  - **Konfigurasi Manifest & Syarat Wajib `UIAccess` (untuk `MagSetInputTransform`):**
+    Agar Windows mengizinkan pemetaan klik `MagSetInputTransform` pada build rilis (tidak ditolak dengan `ERROR_ACCESS_DENIED`), distribusi produksi harus memenuhi ketiga syarat keamanan Windows UAC/UIPI secara bersamaan:
+    1. Manifest Windows menyertakan `<requestedExecutionLevel level="asInvoker" uiAccess="true" />`.
+    2. Binary ditandatangani secara digital (**Authenticode code signing**) dengan sertifikat tepercaya yang berantai ke *Trusted Root* (untuk pengujian lokal dengan *self-signed certificate*, sertifikat perlu dipasang manual ke *Trusted Root* mesin).
+    3. Installer (NSIS/MSI) memasang aplikasi ke lokasi terlindungi Windows (`%ProgramFiles%`, `%ProgramFiles(x86)%`, atau `%WinDir%\System32\`), karena menjalankan binary dari folder dev/Desktop/Downloads akan otomatis mencabut hak `UIAccess`.
   - Pengujian instalasi & uninstalasi bersih pada Windows 10 & Windows 11.
   - Pembuatan panduan penggunaan (README / cheatsheet tombol cepat).
 * **Output / Definition of Done (DoD):**
