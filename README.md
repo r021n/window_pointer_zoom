@@ -9,11 +9,49 @@ Built with Tauri 2, React + TypeScript, and Rust.
 - **OS:** Windows 10 (version 1703 or later) or Windows 11, 64-bit (`x64` / `arm64`)
 - **Runtime:** Microsoft Edge WebView2 Runtime (included on Windows 11 and most Windows 10 systems; installed automatically by the NSIS/MSI installer if missing)
 
+## Building from Source
+
+This repository does not ship prebuilt installers. Build the app locally with the steps below.
+
+### Prerequisites
+
+- Windows 10 (version 1703 or later) or Windows 11, 64-bit
+- Node.js 20+ and npm
+- Rust with the MSVC toolchain (`x86_64-pc-windows-msvc` or `aarch64-pc-windows-msvc`)
+- Visual Studio Build Tools with the **Desktop development with C++** workload
+- Microsoft Edge WebView2 Runtime (required at runtime)
+- [WiX Toolset v3](https://github.com/wixtoolset/wix3) on `PATH` — only needed to build the `.msi` bundle
+
+```powershell
+npm install
+
+# Development mode (unsigned, UIAccess disabled)
+npm run tauri dev
+
+# Standalone executable, no installers
+npm run tauri build -- --no-bundle
+# -> src-tauri\target\release\window-pointer-zoom.exe
+
+# Installers, unsigned unless you supply a signing certificate
+npm run tauri build
+# -> src-tauri\target\release\bundle\nsis\*.exe
+# -> src-tauri\target\release\bundle\msi\*.msi
+```
+
+### Limitations of locally built binaries
+
+- **UIAccess is disabled in unsigned builds.** Visual zoom still works, but Windows denies `MagSetInputTransform`, so mouse clicks can miss their targets while zoomed. The app reports this as `Input mapping: denied` under **Settings → Mouse input diagnostics**. Only mouse routing is affected; zooming and panning are unaffected.
+- **Do not redistribute the installers from the commands above.** They are unsigned, so Windows shows an "Unknown publisher" prompt and SmartScreen warnings, and UIAccess remains denied on the destination machine.
+- **Accurate click routing requires a trusted code signing certificate.** Windows grants `UIAccess` only when all three conditions are met: the binary embeds `uiAccess="true"`, it is signed with a certificate whose chain is trusted on that machine, and it is installed in a protected location such as `%ProgramFiles%`.
+- **Self-signed certificates are for local QA only.** A build signed with a self-signed certificate (such as `CN=Window Pointer Zoom Local QA`) will show an untrusted signature and "Unknown publisher" on other machines, and UIAccess will still be denied because the root is not trusted there. Distributing a build that others can use requires a commercial Authenticode code signing certificate or an equivalent trusted signing service.
+
+The signed `UIAccess` release pipeline lives in `scripts/build-uiaccess.ps1`. It sets `WPZ_UIACCESS=1`, injects the signing configuration, isolates artifacts under `src-tauri\target\uiaccess`, and verifies the signatures of both the installers and the packed executable. See [docs/uiaccess-release.md](docs/uiaccess-release.md) for the full procedure and release checklist.
+
 ## Installation, Upgrade & Uninstall
 
 ### Install
 
-Install using either signed per-machine release installer:
+Install using either signed per-machine release installer (build them yourself as described in [Building from Source](#building-from-source)):
 
 - **NSIS installer (`.exe`)** or **Windows Installer (`.msi`)**
 
