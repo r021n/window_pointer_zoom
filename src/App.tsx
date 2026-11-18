@@ -1,6 +1,7 @@
 import { Sliders, Wrench, ZoomIn } from "lucide-react";
 import { InputMappingDiagnostics, InputMappingNotice } from "./components/InputMappingNotice";
 import { PanningBehaviorPanel } from "./components/PanningBehaviorPanel";
+import { PointerSettingsPanel } from "./components/PointerSettingsPanel";
 import { ShortcutConfigurator } from "./components/ShortcutConfigurator";
 import { SystemSettingsPanel } from "./components/SystemSettingsPanel";
 import { ZoomBoundsPanel } from "./components/ZoomBoundsPanel";
@@ -10,11 +11,13 @@ import { Button } from "./components/ui/button";
 import { Card, CardContent } from "./components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
 import { useAppSettings } from "./hooks/useAppSettings";
+import { usePointerSettings } from "./hooks/usePointerSettings";
 import { useTheme } from "./hooks/useTheme";
 import { useZoomController } from "./hooks/useZoomController";
 
 export function App() {
   const { theme, setTheme } = useTheme();
+  const pointer = usePointerSettings();
 
   const {
     status,
@@ -51,6 +54,7 @@ export function App() {
   } = useAppSettings({ onStatusSynced: syncStatus });
 
   const combinedError = zoomError ?? settingsError;
+  const isSavingSettings = isSaving || pointer.isUpdating;
 
   const handleDismissError = () => {
     clearZoomError();
@@ -151,10 +155,18 @@ export function App() {
 
             <TabsContent value="system">
               <InputMappingDiagnostics status={status!} />
+              <PointerSettingsPanel
+                snapshot={pointer.snapshot}
+                error={pointer.error}
+                isUpdating={isSavingSettings}
+                onUpdateSettings={(next) => void pointer.updateSettings(next)}
+                onApplyDefaultSize={() => void pointer.applyDefaultSize()}
+                onRestoreSize={() => void pointer.resetSize()}
+              />
               <ShortcutConfigurator
                 shortcuts={shortcuts!}
                 shortcutError={shortcutError}
-                isSaving={isSaving}
+                isSaving={isSavingSettings}
                 onUpdateShortcuts={updateShortcuts}
                 onSetShortcutsPaused={setShortcutsPaused}
                 onClearShortcutError={clearShortcutError}
@@ -162,10 +174,10 @@ export function App() {
               <SystemSettingsPanel
                 autostartEnabled={autostartEnabled}
                 theme={theme}
-                isSaving={isSaving}
+                isSaving={isSavingSettings}
                 onToggleAutostart={(enabled) => void toggleAutostart(enabled)}
                 onChangeTheme={(next) => void setTheme(next)}
-                onResetToDefaults={() => void resetToDefaults()}
+                onResetToDefaults={() => void resetToDefaults().then(pointer.resetPreferences)}
               />
             </TabsContent>
           </div>

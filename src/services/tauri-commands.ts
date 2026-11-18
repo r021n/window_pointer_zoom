@@ -3,6 +3,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   EngineSettingsSnapshot,
   PanningConfig,
+  PointerSettings,
+  PointerSettingsSnapshot,
   ShortcutConfig,
   ZoomLimits,
   ZoomStatus,
@@ -46,6 +48,32 @@ export function updateShortcuts(config: ShortcutConfig): Promise<ShortcutConfig>
 
 export function setShortcutsPaused(paused: boolean): Promise<void> {
   return invoke<void>("set_shortcuts_paused", { paused });
+}
+
+export function getPointerSettings(): Promise<PointerSettingsSnapshot> {
+  return invoke<PointerSettingsSnapshot>("get_pointer_settings");
+}
+
+export function updatePointerSettings(
+  settings: PointerSettings,
+): Promise<PointerSettingsSnapshot> {
+  return invoke<PointerSettingsSnapshot>("update_pointer_settings", { settings });
+}
+
+export function applyDefaultPointerSize(): Promise<PointerSettingsSnapshot> {
+  return invoke<PointerSettingsSnapshot>("apply_default_pointer_size");
+}
+
+export function resetPointerSize(): Promise<PointerSettingsSnapshot> {
+  return invoke<PointerSettingsSnapshot>("reset_pointer_size");
+}
+
+export function subscribePointerStatus(
+  onStatus: (status: PointerSettingsSnapshot) => void,
+): Promise<UnlistenFn> {
+  return listen<PointerSettingsSnapshot>("pointer-status-changed", (event) => {
+    onStatus(event.payload);
+  });
 }
 
 export function subscribeZoomStatus(

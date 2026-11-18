@@ -6,7 +6,7 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
-import { Keyboard } from "lucide-react";
+import { Keyboard, X } from "lucide-react";
 import type { ShortcutConfig } from "../types/settings";
 import {
   findDuplicateShortcutAction,
@@ -28,11 +28,15 @@ export interface ShortcutConfiguratorProps {
 const SHORTCUT_ROWS: ReadonlyArray<{
   key: ShortcutActionKey;
   label: string;
+  clearable?: boolean;
 }> = [
   { key: "toggle", label: "Toggle Zoom" },
   { key: "zoomIn", label: "Zoom In" },
   { key: "zoomOut", label: "Zoom Out" },
   { key: "reset", label: "Reset Zoom" },
+  { key: "pointerSizeUp", label: "Increase Pointer Size", clearable: true },
+  { key: "pointerSizeDown", label: "Decrease Pointer Size", clearable: true },
+  { key: "pointerSizeReset", label: "Reset Pointer Size", clearable: true },
 ];
 
 export function ShortcutConfigurator({
@@ -145,6 +149,13 @@ export function ShortcutConfigurator({
     }
   };
 
+  const clearBinding = async (action: ShortcutActionKey) => {
+    await stopRecording();
+    onClearShortcutError();
+    setValidationError(null);
+    await onUpdateShortcuts({ ...shortcuts, [action]: null });
+  };
+
   const displayedError = validationError ?? shortcutError;
 
   return (
@@ -172,6 +183,8 @@ export function ShortcutConfigurator({
         <div className="space-y-2">
           {SHORTCUT_ROWS.map((row) => {
             const isRecording = recordingAction === row.key;
+            const binding = shortcuts[row.key];
+            const bindingLabel = binding ? <ShortcutKeycaps shortcut={binding} /> : "Unassigned";
             return (
               <div
                 key={row.key}
@@ -180,22 +193,33 @@ export function ShortcutConfigurator({
                 <span className="text-xs font-medium text-foreground">
                   {row.label}
                 </span>
-                <Button
-                  size="sm"
-                  variant={isRecording ? "default" : "outline"}
-                  disabled={isSaving}
-                  aria-label={`${row.label} shortcut: ${
-                    isRecording ? "recording" : shortcuts[row.key]
-                  }`}
-                  onClick={() => void handleStartRecording(row.key)}
-                  onKeyDown={(event) => void handleKeyDown(row.key, event)}
-                  onBlur={() => handleBlur(row.key)}
-                  className="min-w-[148px] font-mono text-xs"
-                >
-                  {isRecording
-                    ? "Press keys… (Esc)"
-                    : <ShortcutKeycaps shortcut={shortcuts[row.key]} />}
-                </Button>
+                <div className="flex items-center gap-1">
+                  {row.clearable && binding && (
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      disabled={isSaving}
+                      aria-label={`Clear ${row.label} shortcut`}
+                      onClick={() => void clearBinding(row.key)}
+                    >
+                      <X />
+                    </Button>
+                  )}
+                  <Button
+                    size="sm"
+                    variant={isRecording ? "default" : "outline"}
+                    disabled={isSaving}
+                    aria-label={`${row.label} shortcut: ${
+                      isRecording ? "recording" : binding ?? "Unassigned"
+                    }`}
+                    onClick={() => void handleStartRecording(row.key)}
+                    onKeyDown={(event) => void handleKeyDown(row.key, event)}
+                    onBlur={() => handleBlur(row.key)}
+                    className="min-w-[148px] font-mono text-xs"
+                  >
+                    {isRecording ? "Press keys… (Esc)" : bindingLabel}
+                  </Button>
+                </div>
               </div>
             );
           })}

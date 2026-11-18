@@ -75,7 +75,7 @@ export function SystemSettingsPanel({
 
         <div className="flex items-center justify-between gap-3 pt-1">
           <p className="text-xs text-muted-foreground">
-            Restores zoom bounds, panning behavior, and shortcuts.
+            Restores zoom, motion, pointer, and shortcut settings.
           </p>
           <Button
             size="sm"

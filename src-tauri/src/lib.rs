@@ -2,6 +2,7 @@
 
 mod commands;
 pub mod engine;
+mod pointer_controls;
 mod shortcuts;
 pub mod state;
 mod tray;
@@ -17,6 +18,7 @@ use crate::engine::fullscreen_engine::{
     enable_per_monitor_dpi_awareness, install_console_ctrl_handler,
 };
 use crate::engine::wheel_hook::{spawn_wheel_hook, WheelHookState};
+use crate::pointer_controls::{PointerControls, POINTER_SETTINGS_KEY};
 use crate::shortcuts::{ShortcutConfig, ShortcutManager};
 use crate::state::{AppState, PersistedEngineSettings, ZoomAction, ZoomStatus};
 
@@ -86,11 +88,23 @@ fn hydrate_from_store(app: &AppHandle) {
                 &app.state::<AppState>(),
                 &app.state::<ShortcutManager>(),
             );
+            if let Err(err) = app
+                .state::<PointerControls>()
+                .hydrate(store.get(POINTER_SETTINGS_KEY))
+            {
+                eprintln!("Warning: ignoring invalid '{POINTER_SETTINGS_KEY}' in store: {err}");
+            }
         }
         Err(err) => {
             eprintln!("Warning: failed to open '{SETTINGS_STORE_PATH}': {err}");
         }
     }
+}
+
+fn shutdown_workers(app: &AppHandle) {
+    app.state::<WheelHookState>().shutdown();
+    app.state::<PointerControls>().shutdown();
+    app.state::<AppState>().shutdown();
 }
 
 /// Configures and runs the Tauri desktop application.
@@ -109,27 +123,38 @@ pub fn run() {
         ))
         .plugin(shortcuts::plugin())
         .manage(AppState::new())
+        .manage(PointerControls::new())
         .manage(WheelHookState::new())
         .manage(ShortcutManager::new())
         .on_window_event(window::handle_window_event)
         .setup(|app| {
             hydrate_from_store(app.handle());
 
-            if !std::env::args().any(|arg| arg == "--minimized") {
-                window::show_main_window(app.handle());
-            }
-
             let status_handle = app.handle().clone();
-            app.state::<AppState>()
+            let state = app.state::<AppState>();
+            state
                 .start(Some(Arc::new(move |status| {
                     emit_zoom_status(&status_handle, status);
                 })))
                 .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
             tray::setup_tray(app.handle())?;
-            shortcuts::register_shortcuts(app.handle());
-            let hook_handle = spawn_wheel_hook(app.handle().clone())
+            let clicks = match app
+                .state::<PointerControls>()
+                .start_overlay(state.applied_zoom())
+            {
+                Ok(clicks) => Some(clicks),
+                Err(err) => {
+                    eprintln!("Warning: failed to start the click effect: {err}");
+                    None
+                }
+            };
+            let hook_handle = spawn_wheel_hook(app.handle().clone(), clicks)
                 .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
             app.state::<WheelHookState>().set(hook_handle);
+            shortcuts::register_shortcuts(app.handle());
+            if !std::env::args().any(|arg| arg == "--minimized") {
+                window::show_main_window(app.handle());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -143,6 +168,10 @@ pub fn run() {
             commands::update_zoom_limits,
             commands::update_shortcuts,
             commands::set_shortcuts_paused,
+            commands::get_pointer_settings,
+            commands::update_pointer_settings,
+            commands::apply_default_pointer_size,
+            commands::reset_pointer_size,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -154,15 +183,14 @@ pub fn run() {
             exit_handle.exit(0);
         }),
         Arc::new(move || {
-            close_handle.state::<AppState>().shutdown();
+            shutdown_workers(&close_handle);
         }),
     );
 
     app.run(|app, event| {
         if let tauri::RunEvent::Exit = event {
             shortcuts::unregister_all(app);
-            app.state::<WheelHookState>().shutdown();
-            app.state::<AppState>().shutdown();
+            shutdown_workers(app);
         }
     });
 }
@@ -234,6 +262,7 @@ mod tests {
                 zoom_in: "Ctrl+Shift+Up".to_string(),
                 zoom_out: "Ctrl+Shift+Down".to_string(),
                 reset: "Ctrl+Shift+0".to_string(),
+                ..ShortcutConfig::default()
             }
         );
 

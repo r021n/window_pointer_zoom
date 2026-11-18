@@ -1,8 +1,9 @@
-//! Global `Ctrl + Alt + Mouse Wheel` hook (`WH_MOUSE_LL`) and delta accumulator.
+//! Global mouse hook (`WH_MOUSE_LL`) for wheel zoom and click effects.
 //! All `unsafe` Win32 hook FFI lives in this module inside `engine/`.
 
+use std::cell::OnceCell;
 use std::sync::mpsc::{self, SyncSender};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -12,10 +13,11 @@ use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_MENU};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetMessageW, PeekMessageW, PostThreadMessageW, SetWindowsHookExW,
-    UnhookWindowsHookEx, HHOOK, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, WH_MOUSE_LL, WM_MOUSEWHEEL,
-    WM_QUIT,
+    UnhookWindowsHookEx, HC_ACTION, HHOOK, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, WH_MOUSE_LL,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
 };
 
+use super::click_overlay::{ClickButton, ClickEventSink, ClickPhase};
 use crate::dispatch_zoom_action;
 use crate::state::ZoomAction;
 
@@ -28,7 +30,16 @@ enum WheelMsg {
     Shutdown,
 }
 
-static WHEEL_TX: OnceLock<SyncSender<WheelMsg>> = OnceLock::new();
+struct HookSenders {
+    wheel: SyncSender<WheelMsg>,
+    clicks: Option<ClickEventSink>,
+}
+
+thread_local! {
+    // Win32 invokes a low-level hook on its installing thread. Its sinks are owned by
+    // that thread and are released automatically if initialization or shutdown ends it.
+    static HOOK_SENDERS: OnceCell<HookSenders> = const { OnceCell::new() };
+}
 
 /// Accumulates raw `WM_MOUSEWHEEL` deltas (including sub-`120` precision touchpad increments)
 /// into discrete `ZoomIn` / `ZoomOut` actions.
@@ -91,21 +102,45 @@ unsafe extern "system" fn low_level_mouse_proc(
     w_param: WPARAM,
     l_param: LPARAM,
 ) -> LRESULT {
-    if n_code >= 0 && w_param.0 as u32 == WM_MOUSEWHEEL && l_param.0 != 0 {
+    if n_code != HC_ACTION as i32 || l_param.0 == 0 {
+        return CallNextHookEx(None, n_code, w_param, l_param);
+    }
+
+    let message = w_param.0 as u32;
+    if message == WM_MOUSEWHEEL {
         let ctrl_held = GetAsyncKeyState(i32::from(VK_CONTROL.0)) < 0;
         let alt_held = GetAsyncKeyState(i32::from(VK_MENU.0)) < 0;
         if ctrl_held && alt_held {
             let msll = &*(l_param.0 as *const MSLLHOOKSTRUCT);
             let delta = ((msll.mouseData >> 16) as u16) as i16;
             if delta != 0 {
-                if let Some(tx) = WHEEL_TX.get() {
-                    let _ = tx.try_send(WheelMsg::Delta(delta));
-                }
+                HOOK_SENDERS.with(|senders| {
+                    if let Some(senders) = senders.get() {
+                        let _ = senders.wheel.try_send(WheelMsg::Delta(delta));
+                    }
+                });
                 return LRESULT(1);
             }
         }
+    } else if let Some((button, phase)) = click_action(message) {
+        HOOK_SENDERS.with(|senders| {
+            if let Some(sink) = senders.get().and_then(|senders| senders.clicks.as_ref()) {
+                let msll = &*(l_param.0 as *const MSLLHOOKSTRUCT);
+                sink.send(button, phase, msll.pt);
+            }
+        });
     }
     CallNextHookEx(None, n_code, w_param, l_param)
+}
+
+fn click_action(message: u32) -> Option<(ClickButton, ClickPhase)> {
+    match message {
+        WM_LBUTTONDOWN => Some((ClickButton::Left, ClickPhase::Press)),
+        WM_LBUTTONUP => Some((ClickButton::Left, ClickPhase::Release)),
+        WM_RBUTTONDOWN => Some((ClickButton::Right, ClickPhase::Press)),
+        WM_RBUTTONUP => Some((ClickButton::Right, ClickPhase::Release)),
+        _ => None,
+    }
 }
 
 /// Active thread and channel handles for the running mouse wheel hook.
@@ -181,12 +216,12 @@ impl Drop for WheelHookState {
     }
 }
 
-/// Spawns the `"wheel-dispatch"` and `"wheel-hook"` threads and installs `WH_MOUSE_LL`.
-pub fn spawn_wheel_hook(app: AppHandle) -> Result<WheelHookHandle, String> {
+/// Spawns the wheel dispatcher and installs `WH_MOUSE_LL` on its own thread.
+pub fn spawn_wheel_hook(
+    app: AppHandle,
+    clicks: Option<ClickEventSink>,
+) -> Result<WheelHookHandle, String> {
     let (msg_tx, msg_rx) = mpsc::sync_channel::<WheelMsg>(WHEEL_CHANNEL_CAPACITY);
-    WHEEL_TX
-        .set(msg_tx.clone())
-        .map_err(|_| "Wheel hook sender already initialized".to_string())?;
 
     let dispatch_thread = thread::Builder::new()
         .name("wheel-dispatch".to_string())
@@ -205,10 +240,17 @@ pub fn spawn_wheel_hook(app: AppHandle) -> Result<WheelHookHandle, String> {
         })
         .map_err(|err| format!("Failed to spawn wheel-dispatch thread: {err}"))?;
 
+    let senders = HookSenders {
+        wheel: msg_tx.clone(),
+        clicks,
+    };
     let (init_tx, init_rx) = mpsc::sync_channel::<Result<u32, String>>(1);
     let hook_thread = match thread::Builder::new()
         .name("wheel-hook".to_string())
         .spawn(move || {
+            HOOK_SENDERS.with(|slot| {
+                slot.get_or_init(|| senders);
+            });
             let mut msg = MSG::default();
             // Force Win32 message queue creation before reporting thread id for WM_QUIT.
             unsafe {

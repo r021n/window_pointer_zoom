@@ -112,10 +112,16 @@ describe("shortcut utils", () => {
       zoomIn: "Ctrl+Alt+Up",
       zoomOut: "Ctrl+Alt+Down",
       reset: "Ctrl+Alt+0",
+      pointerSizeUp: null,
+      pointerSizeDown: "Ctrl+Shift+M",
+      pointerSizeReset: null,
     };
 
     expect(findDuplicateShortcutAction(config, "zoomIn", "Alt+Ctrl+Z")).toBe(
       "toggle",
+    );
+    expect(findDuplicateShortcutAction(config, "toggle", "Shift+Ctrl+M")).toBe(
+      "pointerSizeDown",
     );
     expect(findDuplicateShortcutAction(config, "toggle", "Ctrl+Alt+Z")).toBeNull();
     expect(findDuplicateShortcutAction(config, "reset", "Ctrl+Shift+R")).toBeNull();

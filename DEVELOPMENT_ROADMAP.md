@@ -101,7 +101,7 @@ Ketika layar diperbesar dengan faktor $\text{scale} > 1.0$:
 
 ---
 
-## 5. Rencana & 6 Fase Pengembangan (Revisi untuk Full-Screen Zoom)
+## 5. Rencana & 7 Fase Pengembangan (Revisi untuk Full-Screen Zoom)
 
 ### Fase 1: Core Engine Full-Screen Magnification (PoC Rust)
 *Fokus: Memvalidasi kemampuan pembesaran seluruh layar dan kalkulasi offset viewport mengikuti kursor.*
@@ -214,5 +214,39 @@ Ketika layar diperbesar dengan faktor $\text{scale} > 1.0$:
 * **Output / Definition of Done (DoD):**
   - [ ] Installer standalone (`.exe` / `.msi`) yang teruji dan siap didistribusikan.
   - [ ] Dokumentasi lengkap siap pakai untuk pengguna.
+
+---
+
+### Fase 7: Pointer Sizing Dinamis & Efek Klik (Pendekatan Efisien)
+*Fokus: Menambahkan kontrol ukuran pointer berbasis shortcut keyboard dan efek visual saat klik mouse dengan overhead CPU/GPU minimal (zero-idle overhead).*
+
+#### Prinsip Arsitektur Efisien (Hybrid Native Cursor + On-Demand Overlay)
+Alih-alih menggambar ulang custom pointer di seluruh layar pada 60+ FPS secara terus-menerus, fase ini memisahkan tanggung jawab menjadi dua mekanisme ringan:
+1. **Native OS Cursor Sizing (`CursorBaseSize` + `SystemParametersInfoW`):**  
+   Ukuran pointer diubah langsung di level OS Windows sehingga seluruh bentuk kursor kontekstual (*arrow*, *I-beam*, *hand*, *resize*) tetap tajam, berjalan dengan **0% beban render saat idle**, dan otomatis ikut ter-scale oleh `MagSetFullscreenTransform`.
+2. **On-Demand Lightweight Click Overlay:**  
+   Efek klik (seperti *compressing ring / click pulse* yang memberi sensasi *squash/tekan* atau *ripple* di sekitar ujung pointer) dirender hanya selama animasi berlangsung (~200–350 ms) pada jendela transparan *click-through* berukuran kecil di sekitar titik klik, lalu kembali *idle/hidden* setelah selesai.
+
+* **Aktivitas yang dikerjakan:**
+  - **1. Dynamic Pointer Sizing via Win32 API:**
+    - Menambahkan modul backend (misal `src-tauri/src/engine/pointer_size.rs`) untuk membaca ukuran awal `CursorBaseSize` di `HKCU\Control Panel\Cursors` sebagai *baseline* saat aplikasi mulai.
+    - Mengubah ukuran kursor secara bertahap (misal rentang `32` px hingga `128` px dengan step konfigurabel) dengan memperbarui `CursorBaseSize` dan memicu hot-reload OS secara instan melalui `SystemParametersInfoW` (action `0x2029`, `SPIF_SENDCHANGE`).
+    - **Clean Restore & Safety:** Menyimpan nilai *baseline* pengguna dan memastikan ukuran kursor otomatis dikembalikan ke nilai awal saat fitur dimatikan, aplikasi di-*exit*, maupun melalui *console ctrl / drop guard*.
+  - **2. Shortcut Keyboard & Pengaturan UI:**
+    - Memperluas `ShortcutConfig` dan `ShortcutManager` (`src-tauri/src/shortcuts.rs`) untuk mendukung aksi baru: *Pointer Size Up* (perbesar pointer), *Pointer Size Down* (perkecil pointer), dan *Reset Pointer Size*.
+    - Menambahkan konfigurasi ukuran default/step pointer, toggle efek klik, serta perekam shortcut baru di UI React (`Settings` / panel kontrol) dan menyimpannya ke `settings.json`.
+  - **3. Deteksi Klik Global pada Hook `WH_MOUSE_LL` yang Sudah Ada:**
+    - Memperluas `low_level_mouse_proc` di `src-tauri/src/engine/wheel_hook.rs` agar ikut memantau pesan klik mouse (`WM_LBUTTONDOWN`, `WM_LBUTTONUP`, `WM_RBUTTONDOWN`, `WM_RBUTTONUP`) tanpa memblokir event (`CallNextHookEx` tetap selalu dipanggil) dan mengirim event secara non-blocking (`try_send`) ke thread efek klik.
+  - **4. On-Demand Click Effect Overlay (Efek Squash Ring / Ripple):**
+    - Membuat jendela overlay transparan *click-through* (`WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`) berukuran lokal kecil (misal ~128×128 px mengikuti titik klik & DPI monitor aktif, bukan kanvas layar penuh).
+    - Merender animasi efek klik berbasis waktu (*pressed/squash-in* saat `WM_LBUTTONDOWN` dan *spring-release/ripple-out* saat `WM_LBUTTONUP`) menggunakan GDI+ / Direct2D + `UpdateLayeredWindow`, lalu menyembunyikan jendela & menghentikan render loop begitu animasi selesai.
+    - Menyelaraskan posisi dan skala visual efek klik dengan transformasi `FullscreenMagnifier` saat mode zoom aktif, serta memastikan kompatibilitas *Per-Monitor DPI* dan *multi-monitor* (termasuk koordinat virtual desktop negatif).
+  - **5. Opsi Lanjutan (Opsional / Future Extension):**
+    - Jika ke depannya dibutuhkan efek *squash & stretch* langsung pada badan ikon panahnya sendiri (bukan di sekitar kursor), tambahkan sebagai mode opsional terpisah (*Presentation Custom Pointer*) agar mode standar tetap super ringan.
+* **Output / Definition of Done (DoD):**
+  - [ ] Pointer dapat diperbesar dan diperkecil secara instan lewat shortcut keyboard di aplikasi mana pun, dan otomatis kembali ke ukuran awal saat aplikasi ditutup.
+  - [ ] Klik kiri/kanan memicu efek visual responsif (*pressed/squash pulse* atau *ripple*) tepat di ujung pointer tanpa menyebabkan *input lag* atau memblokir klik ke aplikasi di bawahnya.
+  - [ ] Penggunaan CPU dan memori tetap mendekati nol saat mouse tidak sedang diklik (*zero-idle render overhead*).
+  - [ ] Bekerja akurat baik pada skala normal (`1.0x`) maupun saat layar sedang di-zoom (`MagSetFullscreenTransform`), di setup multi-monitor & mixed-DPI.
 
 ---

@@ -38,6 +38,33 @@ export interface ShortcutConfig {
   zoomIn: string;
   zoomOut: string;
   reset: string;
+  pointerSizeUp: string | null;
+  pointerSizeDown: string | null;
+  pointerSizeReset: string | null;
+}
+
+export interface PointerSettings {
+  enabled: boolean;
+  defaultSize: number;
+  step: number;
+  clickEffectEnabled: boolean;
+}
+
+export interface PointerSettingsSnapshot {
+  revision: number;
+  settings: PointerSettings;
+  currentSize: number | null;
+  baselineSize: number | null;
+  constraints: {
+    minSize: number;
+    maxSize: number;
+    minStep: number;
+    maxStep: number;
+    defaultSize: number;
+    defaultStep: number;
+  };
+  error: string | null;
+  clickEffectAvailable: boolean;
 }
 
 export interface RangeBounds {

@@ -1,8 +1,10 @@
-//! Thin Tauri IPC command handlers delegating to `AppState` and `ShortcutManager`.
+//! Thin Tauri IPC handlers for zoom, shortcuts, and pointer controls.
 
 use tauri::{AppHandle, State};
 
 use crate::emit_zoom_status;
+use crate::engine::pointer_size::{PointerAction, PointerSettings};
+use crate::pointer_controls::{PointerControls, PointerSnapshot};
 use crate::shortcuts::{self, ShortcutConfig, ShortcutManager};
 use crate::state::{
     config_constraints, AppState, EngineSettingsSnapshot, PanningConfig, ZoomLimits, ZoomStatus,
@@ -83,4 +85,32 @@ pub fn set_shortcuts_paused(
     shortcut_mgr: State<'_, ShortcutManager>,
 ) -> Result<(), String> {
     shortcuts::set_shortcuts_paused(&app, &shortcut_mgr, paused)
+}
+
+#[tauri::command]
+pub(crate) fn get_pointer_settings(controls: State<'_, PointerControls>) -> PointerSnapshot {
+    controls.snapshot()
+}
+
+#[tauri::command]
+pub(crate) fn update_pointer_settings(
+    app: AppHandle,
+    settings: PointerSettings,
+    controls: State<'_, PointerControls>,
+) -> Result<PointerSnapshot, String> {
+    controls.update_settings(&app, settings)
+}
+
+#[tauri::command]
+pub(crate) fn apply_default_pointer_size(
+    controls: State<'_, PointerControls>,
+) -> Result<PointerSnapshot, String> {
+    controls.apply(PointerAction::ApplyDefault)
+}
+
+#[tauri::command]
+pub(crate) fn reset_pointer_size(
+    controls: State<'_, PointerControls>,
+) -> Result<PointerSnapshot, String> {
+    controls.apply(PointerAction::Reset)
 }

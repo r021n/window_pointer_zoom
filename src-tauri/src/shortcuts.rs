@@ -10,7 +10,8 @@ use tauri_plugin_global_shortcut::{
     Builder, GlobalShortcut, GlobalShortcutExt, Shortcut, ShortcutState,
 };
 
-use crate::{dispatch_zoom_action, state::ZoomAction};
+use crate::engine::pointer_size::PointerAction;
+use crate::{dispatch_zoom_action, pointer_controls, state::ZoomAction};
 
 pub const DEFAULT_TOGGLE_SHORTCUT: &str = "Ctrl+Alt+Z";
 pub const DEFAULT_ZOOM_IN_SHORTCUT: &str = "Ctrl+Alt+Up";
@@ -25,6 +26,9 @@ pub struct ShortcutConfig {
     pub zoom_in: String,
     pub zoom_out: String,
     pub reset: String,
+    pub pointer_size_up: Option<String>,
+    pub pointer_size_down: Option<String>,
+    pub pointer_size_reset: Option<String>,
 }
 
 impl Default for ShortcutConfig {
@@ -34,36 +38,70 @@ impl Default for ShortcutConfig {
             zoom_in: DEFAULT_ZOOM_IN_SHORTCUT.to_string(),
             zoom_out: DEFAULT_ZOOM_OUT_SHORTCUT.to_string(),
             reset: DEFAULT_RESET_SHORTCUT.to_string(),
+            pointer_size_up: None,
+            pointer_size_down: None,
+            pointer_size_reset: None,
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShortcutAction {
+    Zoom(ZoomAction),
+    Pointer(PointerAction),
+}
+
+type ShortcutBinding<'a> = (ShortcutAction, Shortcut, &'a str);
+
 impl ShortcutConfig {
-    fn trimmed(&self) -> Self {
-        Self {
-            toggle: self.toggle.trim().to_string(),
-            zoom_in: self.zoom_in.trim().to_string(),
-            zoom_out: self.zoom_out.trim().to_string(),
-            reset: self.reset.trim().to_string(),
-        }
-    }
-
-    fn entries(&self) -> [(ZoomAction, &str); 4] {
-        [
-            (ZoomAction::Toggle, self.toggle.as_str()),
-            (ZoomAction::ZoomIn, self.zoom_in.as_str()),
-            (ZoomAction::ZoomOut, self.zoom_out.as_str()),
-            (ZoomAction::Reset, self.reset.as_str()),
+    fn normalized(mut self) -> Self {
+        for accelerator in [
+            Some(&mut self.toggle),
+            Some(&mut self.zoom_in),
+            Some(&mut self.zoom_out),
+            Some(&mut self.reset),
+            self.pointer_size_up.as_mut(),
+            self.pointer_size_down.as_mut(),
+            self.pointer_size_reset.as_mut(),
         ]
+        .into_iter()
+        .flatten()
+        {
+            *accelerator = accelerator.trim().to_string();
+        }
+        self
     }
 
-    /// Parses all four bindings and rejects invalid or duplicate accelerators.
-    fn parse_bindings(&self) -> Result<[(ZoomAction, Shortcut, String); 4], String> {
-        let normalized = self.trimmed();
-        let mut seen_ids = HashSet::with_capacity(4);
-        let mut parsed = Vec::with_capacity(4);
+    fn entries(&self) -> impl Iterator<Item = (ShortcutAction, &str)> {
+        use ShortcutAction::{Pointer, Zoom};
+        [
+            (Zoom(ZoomAction::Toggle), Some(self.toggle.as_str())),
+            (Zoom(ZoomAction::ZoomIn), Some(self.zoom_in.as_str())),
+            (Zoom(ZoomAction::ZoomOut), Some(self.zoom_out.as_str())),
+            (Zoom(ZoomAction::Reset), Some(self.reset.as_str())),
+            (
+                Pointer(PointerAction::Increase),
+                self.pointer_size_up.as_deref(),
+            ),
+            (
+                Pointer(PointerAction::Decrease),
+                self.pointer_size_down.as_deref(),
+            ),
+            (
+                Pointer(PointerAction::Reset),
+                self.pointer_size_reset.as_deref(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(action, raw)| raw.map(|accelerator| (action, accelerator)))
+    }
 
-        for (action, raw) in normalized.entries() {
+    /// Parses assigned bindings and rejects invalid or duplicate accelerators.
+    fn parse_bindings(&self) -> Result<Vec<ShortcutBinding<'_>>, String> {
+        let mut seen_ids = HashSet::new();
+        let mut parsed = Vec::new();
+
+        for (action, raw) in self.entries() {
             if raw.is_empty() {
                 return Err(format!("Shortcut for {action:?} cannot be empty"));
             }
@@ -74,16 +112,14 @@ impl ShortcutConfig {
                     "Duplicate shortcut '{raw}' is already assigned to another action"
                 ));
             }
-            parsed.push((action, shortcut, raw.to_string()));
+            parsed.push((action, shortcut, raw));
         }
 
-        parsed
-            .try_into()
-            .map_err(|_| "Unexpected shortcut binding count".to_string())
+        Ok(parsed)
     }
 }
 
-fn build_lookup_map(bindings: &[(ZoomAction, Shortcut, String); 4]) -> HashMap<u32, ZoomAction> {
+fn build_lookup_map(bindings: &[ShortcutBinding<'_>]) -> HashMap<u32, ShortcutAction> {
     bindings
         .iter()
         .map(|(action, shortcut, _)| (shortcut.id(), *action))
@@ -109,7 +145,7 @@ impl ShortcutRegistrar for TauriShortcutRegistrar<'_> {
 
 struct ShortcutInner {
     config: ShortcutConfig,
-    bindings_by_id: HashMap<u32, ZoomAction>,
+    bindings_by_id: HashMap<u32, ShortcutAction>,
     paused: bool,
 }
 
@@ -159,7 +195,7 @@ impl ShortcutManager {
 
     /// Validates and stores `config` before OS registration (used during startup hydration).
     pub fn hydrate(&self, config: ShortcutConfig) -> Result<(), String> {
-        let normalized = config.trimmed();
+        let normalized = config.normalized();
         let bindings = normalized.parse_bindings()?;
         let mut inner = self.lock_inner();
         inner.bindings_by_id = build_lookup_map(&bindings);
@@ -167,8 +203,8 @@ impl ShortcutManager {
         Ok(())
     }
 
-    /// Resolves a pressed shortcut ID to its `ZoomAction`, returning `None` when paused or unbound.
-    fn lookup_action(&self, shortcut_id: u32) -> Option<ZoomAction> {
+    /// Resolves a pressed shortcut ID, returning `None` when paused or unbound.
+    fn lookup_action(&self, shortcut_id: u32) -> Option<ShortcutAction> {
         let inner = self.lock_inner();
         if inner.paused {
             return None;
@@ -194,7 +230,7 @@ impl ShortcutManager {
             inner.paused = true;
             Ok(())
         } else {
-            let mut registered = Vec::with_capacity(4);
+            let mut registered = Vec::with_capacity(bindings.len());
             for (action, shortcut, raw) in &bindings {
                 if let Err(err) = registrar.register(*shortcut) {
                     for s in registered {
@@ -216,7 +252,7 @@ impl ShortcutManager {
         registrar: &R,
         next_config: ShortcutConfig,
     ) -> Result<ShortcutConfig, String> {
-        let normalized = next_config.trimmed();
+        let normalized = next_config.normalized();
         let next_bindings = normalized.parse_bindings()?;
 
         let mut inner = self.lock_inner();
@@ -233,7 +269,7 @@ impl ShortcutManager {
             }
         }
 
-        let mut registered = Vec::with_capacity(4);
+        let mut registered = Vec::with_capacity(next_bindings.len());
         for (action, shortcut, raw) in &next_bindings {
             if let Err(err) = registrar.register(*shortcut) {
                 for s in registered {
@@ -271,8 +307,12 @@ pub fn plugin() -> TauriPlugin<Wry> {
             if event.state() != ShortcutState::Pressed {
                 return;
             }
-            if let Some(action) = app.state::<ShortcutManager>().lookup_action(shortcut.id()) {
-                dispatch_zoom_action(app, action);
+            match app.state::<ShortcutManager>().lookup_action(shortcut.id()) {
+                Some(ShortcutAction::Zoom(action)) => dispatch_zoom_action(app, action),
+                Some(ShortcutAction::Pointer(action)) => {
+                    pointer_controls::dispatch_shortcut(app, action)
+                }
+                None => {}
             }
         })
         .build()
@@ -405,7 +445,7 @@ mod tests {
             reset: "   ".to_string(),
             ..ShortcutConfig::default()
         };
-        assert!(empty.parse_bindings().is_err());
+        assert!(empty.normalized().parse_bindings().is_err());
 
         // Case-insensitive duplicate detection via Shortcut::id()
         let duplicate = ShortcutConfig {
@@ -414,6 +454,42 @@ mod tests {
             ..ShortcutConfig::default()
         };
         assert!(duplicate.parse_bindings().is_err());
+    }
+
+    #[test]
+    fn pointer_bindings_share_validation_and_registration_with_zoom_bindings() {
+        let mgr = ShortcutManager::new();
+        let registrar = MockRegistrar::failing_on(&["Ctrl+Alt+F10"]);
+        registrar.seed(&mgr.config());
+        let config = ShortcutConfig {
+            pointer_size_up: Some("Ctrl+Alt+F9".to_string()),
+            ..ShortcutConfig::default()
+        };
+        mgr.update_with(&registrar, config.clone()).unwrap();
+        let id = Shortcut::from_str("Ctrl+Alt+F9").unwrap().id();
+        assert_eq!(
+            mgr.lookup_action(id),
+            Some(ShortcutAction::Pointer(PointerAction::Increase))
+        );
+
+        let duplicate = ShortcutConfig {
+            pointer_size_down: Some("Alt+Ctrl+Z".to_string()),
+            ..config.clone()
+        };
+        assert!(duplicate.parse_bindings().is_err());
+        let conflict = ShortcutConfig {
+            pointer_size_down: Some("Ctrl+Alt+F10".to_string()),
+            ..config.clone()
+        };
+        assert!(mgr.update_with(&registrar, conflict).is_err());
+        assert_eq!(mgr.config(), config);
+        assert!(registrar.is_active("Ctrl+Alt+F9"));
+        assert!(registrar.is_active(DEFAULT_TOGGLE_SHORTCUT));
+
+        mgr.update_with(&registrar, ShortcutConfig::default())
+            .unwrap();
+        assert_eq!(mgr.lookup_action(id), None);
+        assert_eq!(registrar.active_count(), 4);
     }
 
     #[test]
@@ -426,7 +502,10 @@ mod tests {
         let toggle_id = Shortcut::from_str(DEFAULT_TOGGLE_SHORTCUT)
             .expect("valid")
             .id();
-        assert_eq!(mgr.lookup_action(toggle_id), Some(ZoomAction::Toggle));
+        assert_eq!(
+            mgr.lookup_action(toggle_id),
+            Some(ShortcutAction::Zoom(ZoomAction::Toggle))
+        );
 
         mgr.set_paused_with(&registrar, true)
             .expect("pause succeeds");
@@ -437,7 +516,10 @@ mod tests {
             .expect("unpause succeeds");
         assert_eq!(registrar.active_count(), 4);
         assert!(registrar.is_active(DEFAULT_TOGGLE_SHORTCUT));
-        assert_eq!(mgr.lookup_action(toggle_id), Some(ZoomAction::Toggle));
+        assert_eq!(
+            mgr.lookup_action(toggle_id),
+            Some(ShortcutAction::Zoom(ZoomAction::Toggle))
+        );
     }
 
     #[test]
@@ -451,6 +533,7 @@ mod tests {
             zoom_in: "Ctrl+Shift+Up".to_string(),
             zoom_out: "Ctrl+Shift+Down".to_string(),
             reset: "Ctrl+Shift+0".to_string(),
+            ..ShortcutConfig::default()
         };
 
         let err = mgr
@@ -485,6 +568,7 @@ mod tests {
             zoom_in: "Ctrl+Shift+Up".to_string(),
             zoom_out: "Ctrl+Shift+Down".to_string(),
             reset: "Ctrl+Shift+0".to_string(),
+            ..ShortcutConfig::default()
         };
         assert!(mgr.update_with(&registrar, bad_next).is_err());
         assert_eq!(registrar.active_count(), 0);
@@ -496,6 +580,7 @@ mod tests {
             zoom_in: "Ctrl+Shift+Up".to_string(),
             zoom_out: "Ctrl+Shift+Down".to_string(),
             reset: "Ctrl+Shift+9".to_string(),
+            ..ShortcutConfig::default()
         };
         let saved = mgr
             .update_with(&registrar, good_next.clone())

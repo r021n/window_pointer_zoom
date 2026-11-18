@@ -3,6 +3,7 @@
 
 use std::marker::PhantomData;
 use std::mem::size_of;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -137,24 +138,45 @@ fn to_win_rect(rect: RectI32) -> RECT {
     }
 }
 
+/// Visual magnification applied by DWM, independent of input mapping success.
+pub struct AppliedZoomTransform(AtomicU32);
+
+impl Default for AppliedZoomTransform {
+    fn default() -> Self {
+        Self(AtomicU32::new(1.0_f32.to_bits()))
+    }
+}
+
+impl AppliedZoomTransform {
+    pub(super) fn scale(&self) -> f32 {
+        f32::from_bits(self.0.load(Ordering::Relaxed))
+    }
+
+    fn record_scale(&self, scale: f32) {
+        self.0.store(scale.to_bits(), Ordering::Relaxed);
+    }
+}
+
 /// RAII wrapper around Windows fullscreen magnification and synchronized input mapping.
 ///
 /// Uses `PhantomData<*mut ()>` (`!Send`, `!Sync`) to enforce Win32 thread affinity:
 /// initialization, transform updates, and uninitialization occur on the owning thread.
 pub struct FullscreenMagnifier {
     input_transform: InputMappingTracker,
+    applied_zoom: Arc<AppliedZoomTransform>,
     _not_send_sync: PhantomData<*mut ()>,
 }
 
 impl FullscreenMagnifier {
     /// Ensures per-monitor v2 DPI awareness on both the process and current worker thread,
     /// then initializes the Magnification API.
-    pub fn new() -> WinResult<Self> {
+    pub fn new(applied_zoom: Arc<AppliedZoomTransform>) -> WinResult<Self> {
         enable_per_monitor_dpi_awareness();
         let _ = unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
         unsafe { MagInitialize() }.ok()?;
         Ok(Self {
             input_transform: InputMappingTracker::new(query_ui_access()),
+            applied_zoom,
             _not_send_sync: PhantomData,
         })
     }
@@ -188,6 +210,7 @@ impl FullscreenMagnifier {
     ) -> WinResult<()> {
         let safe_scale = sanitize_scale(transform.scale);
         unsafe { MagSetFullscreenTransform(safe_scale, transform.x, transform.y) }.ok()?;
+        self.applied_zoom.record_scale(safe_scale);
 
         if self.input_transform.access_denied {
             self.input_transform.set_denied();
@@ -227,6 +250,7 @@ impl FullscreenMagnifier {
         let input_result = self.disable_input_transform();
         // Always restore the screen even if input cleanup failed.
         unsafe { MagSetFullscreenTransform(1.0, 0, 0) }.ok()?;
+        self.applied_zoom.record_scale(1.0);
         input_result
     }
 }
@@ -376,13 +400,14 @@ fn report_input_mapping_change(
 pub fn spawn_engine(
     shared: Arc<SharedEngine>,
     on_status_change: Option<StatusChangeCallback>,
+    applied_zoom: Arc<AppliedZoomTransform>,
 ) -> Result<JoinHandle<()>, String> {
     let (init_tx, init_rx) = mpsc::sync_channel::<Result<(), String>>(1);
 
     let handle = thread::Builder::new()
         .name("zoom-engine".to_string())
         .spawn(move || {
-            let mut magnifier = match FullscreenMagnifier::new() {
+            let mut magnifier = match FullscreenMagnifier::new(applied_zoom) {
                 Ok(magnifier) => {
                     report_input_mapping_change(
                         &shared,

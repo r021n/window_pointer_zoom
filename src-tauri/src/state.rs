@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::engine::fullscreen_engine::AppliedZoomTransform;
 use crate::engine::spawn_engine;
 pub use crate::engine::viewport_math::PanningMode;
 use crate::engine::viewport_math::{
@@ -399,6 +400,7 @@ impl SharedEngine {
 /// Tauri-managed controller owning shared engine state and the worker thread lifecycle.
 pub struct AppState {
     shared: Arc<SharedEngine>,
+    applied_zoom: Arc<AppliedZoomTransform>,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -412,6 +414,7 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             shared: Arc::new(SharedEngine::new()),
+            applied_zoom: Arc::new(AppliedZoomTransform::default()),
             worker: Mutex::new(None),
         }
     }
@@ -427,9 +430,17 @@ impl AppState {
         }
 
         self.shared.clear_shutdown();
-        let handle = spawn_engine(Arc::clone(&self.shared), on_status_change)?;
+        let handle = spawn_engine(
+            Arc::clone(&self.shared),
+            on_status_change,
+            self.applied_zoom(),
+        )?;
         *worker_guard = Some(handle);
         Ok(())
+    }
+
+    pub(crate) fn applied_zoom(&self) -> Arc<AppliedZoomTransform> {
+        Arc::clone(&self.applied_zoom)
     }
 
     /// Returns a snapshot of the current zoom status.

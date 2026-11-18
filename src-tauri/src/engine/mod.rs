@@ -1,6 +1,8 @@
-//! Fullscreen zoom engine modules and worker entrypoint.
+//! Native fullscreen zoom, mouse input, and pointer effects.
 
+pub(crate) mod click_overlay;
 pub mod fullscreen_engine;
+pub(crate) mod pointer_size;
 pub mod viewport_math;
 pub mod wheel_hook;
 

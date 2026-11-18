@@ -226,7 +226,8 @@ export function findDuplicateShortcutAction(
     if (action === targetAction) {
       continue;
     }
-    if (normalizeAccelerator(config[action]) === normalizedCandidate) {
+    const binding = config[action];
+    if (binding && normalizeAccelerator(binding) === normalizedCandidate) {
       return action;
     }
   }

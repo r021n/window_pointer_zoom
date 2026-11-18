@@ -58,6 +58,9 @@ describe("settings-store", () => {
       zoomIn: "Ctrl+Alt+Up",
       zoomOut: "Ctrl+Alt+Down",
       reset: "Ctrl+Alt+0",
+      pointerSizeUp: null,
+      pointerSizeDown: null,
+      pointerSizeReset: null,
     };
 
     await saveShortcuts(shortcuts);
